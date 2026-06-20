@@ -58,7 +58,7 @@ This document tracks every commit made during the development of the **RepoProof
     *   Fixed absolute file path links in documentation keys.
 
 ### Commit 5: Dependency Version Freeze
-*   **Hash**: Pending
+*   **Hash**: `740d609`
 *   **Timestamp**: 2026-06-20 19:20:00 UTC+5:30
 *   **Message**: `chore: freeze backend package dependency versions and log git WSL error`
 *   **Description**:
@@ -66,11 +66,23 @@ This document tracks every commit made during the development of the **RepoProof
     *   Documented package freeze details and WSL2 root git dubious ownership error in `error_context.md`.
     *   Defined the `context_navigator` custom subagent to handle project memory retrieval.
 
+### Commit 6: Phase 1 Foundation Completion
+*   **Hash**: `371df3a`
+*   **Timestamp**: 2026-06-20 19:45:00 UTC+5:30
+*   **Message**: `feat: complete phase 1 foundation with health checks, alembic init, nextjs scaffolding, and langfuse pinning`
+*   **Description**:
+    *   Bootstrapped database migrations with Alembic initialization.
+    *   Added `backend/app/database.py` and `backend/app/redis_client.py` and connected them to database/Redis clients.
+    *   Updated `backend/app/main.py` healthcheck to ping PostgreSQL and Redis and fail dynamically on errors.
+    *   Scaffolded Next.js 16 under `/frontend` with Tailwind CSS, TypeScript, and App Router.
+    *   Pinned the Langfuse image to `langfuse/langfuse:2` in `docker-compose.yml` to prevent clickhouse requirement crash.
+    *   Verified all container healthchecks and local routing communication.
+
 ---
 
 ## Planned Commit Structure
 As we implement the project, we will follow these structured commit points:
-1.  `feat: init frontend nextjs skeleton` - Next.js project startup.
-2.  `test: verify local foundation health checks` - Confirm end-to-end local system communication.
+1.  `feat: design database models and run initial migration` - Start of Phase 2.
+2.  `feat: build github api client wrapper` - Ingestion engine client.
 
 

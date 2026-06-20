@@ -78,4 +78,14 @@ This document serves as the runtime and compilation log for the project developm
 - **Diagnosis**: Git block triggered because root user inside WSL2 does not own the Windows host mounted filesystem directory `/mnt/d/cold-mail/RepoProof`.
 - **Resolution**: Avoid running Git commands inside the WSL sandbox/distro. Instead, run Git commands directly from the host Windows shell (PowerShell or cmd), which has native user ownership and permissions.
 
+### 2026-06-20 19:35 - Event: Langfuse Container Crash on Startup
+- **Status**: Failed
+- **Context**: Booting local developer services using Docker Compose.
+- **Error Encountered**:
+  ```log
+  Error: CLICKHOUSE_URL is not configured. Migrating from V2? Check out migration guide: https://langfuse.com/self-hosting/upgrade-guides/upgrade-v2-to-v3
+  ```
+- **Diagnosis**: Langfuse version 3 (the default for the `:latest` tag) requires ClickHouse database infrastructure for scaled analytics, which is unnecessary and too heavy for lightweight local development.
+- **Resolution**: Changed the image tag in `docker-compose.yml` to `langfuse/langfuse:2` to pin the deployment to the latest Postgres-backed version 2 release. The container now boots and runs successfully.
+
 

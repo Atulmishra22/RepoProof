@@ -4,15 +4,15 @@ This checklist tracks the implementation progress of the platform. Items will be
 
 ---
 
-## [ ] Phase 1: Foundation
-- [ ] Create base workspace folders (`/backend`, `/frontend`, `/docs`).
-- [ ] Create backend `pyproject.toml` and configure the `uv` package manager.
-- [ ] Configure `docker-compose.yml` containing PostgreSQL 16, Redis 7, and MinIO.
-- [ ] Initialize Alembic for database migrations.
-- [ ] Write the FastAPI base app skeleton with `GET /api/v1/health` check.
-- [ ] Create Next.js 16 skeleton with shadcn/ui and basic router pages.
-- [ ] Verify container connectivity (FastAPI connecting to Postgres and Redis).
-- [ ] **First Milestone Test**: Confirm container healthcheck statuses and endpoint ping returns 200.
+## [x] Phase 1: Foundation
+- [x] Create base workspace folders (`/backend`, `/frontend`, `/docs`).
+- [x] Create backend `pyproject.toml` and configure the `uv` package manager.
+- [x] Configure `docker-compose.yml` containing PostgreSQL 16, Redis 7, and MinIO.
+- [x] Initialize Alembic for database migrations.
+- [x] Write the FastAPI base app skeleton with `GET /api/v1/health` check.
+- [x] Create Next.js 16 skeleton with shadcn/ui and basic router pages.
+- [x] Verify container connectivity (FastAPI connecting to Postgres and Redis).
+- [x] **First Milestone Test**: Confirm container healthcheck statuses and endpoint ping returns 200.
 
 ---
 
