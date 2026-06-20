@@ -48,9 +48,21 @@ This document tracks every commit made during the development of the **RepoProof
 
 ---
 
+### Commit 4: Blueprints Update (Sandbox, Memory, GraphRAG, Clarification Gate)
+*   **Hash**: `085ab8d`
+*   **Timestamp**: 2026-06-20 18:52:00 UTC+5:30
+*   **Message**: `docs: update design blueprints to match uv, pyproject.toml, sandbox models, preference memory, graphRAG and clarification gates`
+*   **Description**:
+    *   Updated the system architecture blueprint adding sections on directory-mount security (Sandbox), user preference feedback loops (Reflection), GraphRAG (Token Optimization), and Clarification Gates (Anti-hallucination validation).
+    *   Synced `checklist.md`, `implementation_roadmap.md`, and `session_context.md` files to reflect `pyproject.toml` and `uv` package manager configurations.
+    *   Fixed absolute file path links in documentation keys.
+
+---
+
 ## Planned Commit Structure
 As we implement the project, we will follow these structured commit points:
 1.  `docs: update git commit log` - Track log files.
 2.  `feat: init frontend nextjs skeleton` - Next.js project startup.
 3.  `test: verify local foundation health checks` - Confirm end-to-end local system communication.
+
 
