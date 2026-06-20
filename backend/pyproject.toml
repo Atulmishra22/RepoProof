@@ -1,0 +1,35 @@
+[project]
+name = "repoproof-backend"
+version = "0.1.0"
+description = "GitHub Repository Intelligence Platform Backend"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.1",
+    "pydantic>=2.7.4",
+    "pydantic-settings>=2.3.3",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13.1",
+    "psycopg2-binary>=2.9.9",
+    "pgvector>=0.2.5",
+    "redis>=5.0.6",
+    "celery>=5.4.0",
+    "python-dotenv>=1.0.1",
+    "boto3>=1.34.128",
+    "langgraph>=1.2.6",
+    "langchain-core>=1.4.8",
+    "langchain-community>=0.3.0",
+    "langfuse>=4.9.1",
+    "structlog>=24.2.0",
+    "prometheus-client>=0.20.0",
+    "httpx>=0.27.0",
+]
+
+[tool.uv]
+managed = true
+dev-dependencies = [
+    "black>=24.4.2",
+    "isort>=5.13.2",
+    "pytest>=8.2.2",
+]
