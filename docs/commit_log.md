@@ -57,12 +57,20 @@ This document tracks every commit made during the development of the **RepoProof
     *   Synced `checklist.md`, `implementation_roadmap.md`, and `session_context.md` files to reflect `pyproject.toml` and `uv` package manager configurations.
     *   Fixed absolute file path links in documentation keys.
 
+### Commit 5: Dependency Version Freeze
+*   **Hash**: Pending
+*   **Timestamp**: 2026-06-20 19:20:00 UTC+5:30
+*   **Message**: `chore: freeze backend package dependency versions and log git WSL error`
+*   **Description**:
+    *   Froze all loose backend dependencies in `pyproject.toml` to exact versions compiled and validated in the docker environment.
+    *   Documented package freeze details and WSL2 root git dubious ownership error in `error_context.md`.
+    *   Defined the `context_navigator` custom subagent to handle project memory retrieval.
+
 ---
 
 ## Planned Commit Structure
 As we implement the project, we will follow these structured commit points:
-1.  `docs: update git commit log` - Track log files.
-2.  `feat: init frontend nextjs skeleton` - Next.js project startup.
-3.  `test: verify local foundation health checks` - Confirm end-to-end local system communication.
+1.  `feat: init frontend nextjs skeleton` - Next.js project startup.
+2.  `test: verify local foundation health checks` - Confirm end-to-end local system communication.
 
 

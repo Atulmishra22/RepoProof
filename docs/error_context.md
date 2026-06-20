@@ -61,4 +61,21 @@ This document serves as the runtime and compilation log for the project developm
 - **Diagnosis**: The specific, pinned release tag of the MinIO container image could not be resolved or downloaded from Docker Hub.
 - **Resolution**: Changed the image tag in `docker-compose.yml` to `minio/minio:latest` for local development.
 
+### 2026-06-20 19:10 - Event: Package Dependency Version Freeze
+- **Status**: Success
+- **Context**: Updating backend dependency configuration to use exact versions.
+- **Error Encountered**: None.
+- **Diagnosis**: N/A.
+- **Resolution**: Ran `uv pip freeze` in the running backend container, mapped the compiled versions, and updated `pyproject.toml` dependencies from minimum bounds (e.g. `>=1.2.6`) to exact versions (e.g. `==1.2.6`). Successfully rebuilt backend and worker containers with these frozen versions.
+
+### 2026-06-20 19:15 - Event: Git Dubious Ownership inside WSL2
+- **Status**: Failed
+- **Context**: Running `git status` inside WSL2 Ubuntu distro as root.
+- **Error Encountered**:
+  ```log
+  fatal: detected dubious ownership in repository at '/mnt/d/cold-mail/RepoProof'
+  ```
+- **Diagnosis**: Git block triggered because root user inside WSL2 does not own the Windows host mounted filesystem directory `/mnt/d/cold-mail/RepoProof`.
+- **Resolution**: Avoid running Git commands inside the WSL sandbox/distro. Instead, run Git commands directly from the host Windows shell (PowerShell or cmd), which has native user ownership and permissions.
+
 
