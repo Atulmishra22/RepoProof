@@ -11,7 +11,7 @@ This document outlines the phased build strategy and a compressed 3-week develop
 *   **DEMO**: Running `docker compose up` starts all services, database migrations run successfully, FastAPI returns a 200 health check, and a Next.js page renders.
 *   **DURATION**: 3 Days.
 *   **WHAT TO BUILD**:
-    1.  Create the backend directory structure, install dependencies (FastAPI, Pydantic v2, Alembic, Celery).
+    1.  Create the backend directory structure, initialize pyproject.toml, and configure uv.
     2.  Write base Dockerfiles for backend services and configure `docker-compose.yml` (Postgres, Redis, MinIO).
     3.  Create the Next.js project skeleton using shadcn/ui and Zustand.
     4.  Configure Alembic to manage migrations and write a basic health check endpoint.

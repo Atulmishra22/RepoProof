@@ -6,7 +6,7 @@ This checklist tracks the implementation progress of the platform. Items will be
 
 ## [ ] Phase 1: Foundation
 - [ ] Create base workspace folders (`/backend`, `/frontend`, `/docs`).
-- [ ] Write Python `requirements.txt` and install dependencies.
+- [ ] Create backend `pyproject.toml` and configure the `uv` package manager.
 - [ ] Configure `docker-compose.yml` containing PostgreSQL 16, Redis 7, and MinIO.
 - [ ] Initialize Alembic for database migrations.
 - [ ] Write the FastAPI base app skeleton with `GET /api/v1/health` check.

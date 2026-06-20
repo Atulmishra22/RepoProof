@@ -385,3 +385,40 @@ The `ResumeAgentState` is defined as a `TypedDict`. Below is the logical data la
 *   **What if the server crashes between step 2 and step 8?**
     *   No active process or thread is running in memory while waiting for human input. The Celery worker exited immediately after saving the checkpoint.
     *   If the backend crashes and restarts, the database checkpoint remains intact. When the user eventually returns to the review page and submits their edits, the API will hit the same database, find the checkpoint, and start a fresh Celery worker thread to continue execution.
+
+---
+
+## 1.7 Security & Sandbox Execution Model
+
+To run untrusted agent actions and external code dependencies safely, we implement a multi-layered Least Privilege isolation model:
+*   **Read-Only Bind Mounts (`ro`)**: Cloned GitHub repository files are mapped into worker containers as Read-Only volumes. The agent can read and parse source files but has no filesystem permissions to modify, inject, or delete repository code.
+*   **Rootless Execution**: All processes within the FastAPI and Celery worker containers run as a non-privileged user (`USER 1000:1000`). Root access is blocked globally.
+*   **Ephemeral Package Target Isolation**: If the agent must download a dependency or run an custom tool, it installs packages inside a virtualized target directory (`/tmp/agent_env/`) using `uv pip install --target`. We update the running Python environment path dynamically (`sys.path.append`).
+*   **Subprocess Container Sandboxing**: For executing dynamic code or running shell operations, we spin up secondary throw-away containers, execute the script, capture stdout/stderr, and immediately delete the container.
+
+---
+
+## 1.8 Human-in-the-Loop Feedback & User Preference Memory
+
+To prevent the agent from repeating formatting mistakes or generating unwanted styles across sessions, we implement a reflective memory pipeline:
+*   **Reflection Step**: When a user modifies or rejects claims on the fact-review page, a background task triggers an LLM to compare the original vs. edited versions, extracting general user preferences.
+*   **User Preference Storage**: Extracted rules (e.g. "Do not list local script commands", "Focus heavily on cloud architecture") are saved in the PostgreSQL `user_preferences` table under the user's ID.
+*   **Prompt Injection**: At the start of any new analysis or generation task, the backend queries the database for these style rules and injects them directly into the system prompt as custom user guidelines.
+
+---
+
+## 1.9 Context Optimization & Project Knowledge Graph (GraphRAG)
+
+To reduce token burn and latency during code analysis, we organize the codebase as a dependency graph:
+*   **Dependency Graph (`project_graph.json`)**: We generate a lightweight JSON-structured map of codebase dependencies, file imports, and data links.
+*   **Pruned Retrieval**: When the agent executes a specific task, it consults the project graph first to identify the minimal subset of files required for context. Only these specific file contents are retrieved and fed to the LLM, keeping the token context window small and relevant.
+
+---
+
+## 1.10 Context Ingestion & Clarification Gate
+
+To prevent hallucinations, guessed contact info, or filler words, we implement a context-validation gateway:
+*   **Pydantic Audit Check**: Before starting document generation, the `check_missing_context` node runs a Pydantic schema validation over the active state, checking for missing contact info (phone, email, name) or target parameters (target title, target stack).
+*   **Clarification Interrupt**: If critical fields are missing, the graph records the queries inside `missing_context_questions` and enters an interrupt state (`await_user_context`).
+*   **Questionnaire UI**: The frontend pauses the pipeline and presents the user with an inline form requesting the missing information. Once submitted, the data is saved, and the graph resumes generation with complete, accurate context.
+
