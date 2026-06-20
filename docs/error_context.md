@@ -88,4 +88,22 @@ This document serves as the runtime and compilation log for the project developm
 - **Diagnosis**: Langfuse version 3 (the default for the `:latest` tag) requires ClickHouse database infrastructure for scaled analytics, which is unnecessary and too heavy for lightweight local development.
 - **Resolution**: Changed the image tag in `docker-compose.yml` to `langfuse/langfuse:2` to pin the deployment to the latest Postgres-backed version 2 release. The container now boots and runs successfully.
 
+### 2026-06-21 02:00 - Event: Redis Container Key Loss and Restart Loop
+- **Status**: Failed
+- **Context**: Celery worker stored profiles to Redis, but keys disappeared shortly after.
+- **Error Encountered**: Redis container was restarting continuously.
+- **Diagnosis**: The healthcheck `redis-cli ping | grep PONG` ran via `CMD-SHELL` and failed frequently, causing Docker to mark the container unhealthy and restart it.
+- **Resolution**: Changed healthcheck test in `docker-compose.yml` to `["CMD", "redis-cli", "ping"]`.
+
+### 2026-06-21 02:10 - Event: WSL2 Idle Shutdown & Port Forwarding Block
+- **Status**: Failed
+- **Context**: Next.js frontend browser client could not connect to FastAPI backend (`TypeError: Failed to fetch` on localhost:8000).
+- **Error Encountered**:
+  ```log
+  TypeError: Failed to fetch at fetchUserData (src/app/dashboard/page.tsx:43:30)
+  ```
+- **Diagnosis**: Two issues: (1) WSL2 auto-shut down after 60 seconds of inactivity because no active console shells kept it open. (2) `localhostForwarding` was not explicitly enabled in the global `.wslconfig` file, preventing the Windows host browser from reaching the container.
+- **Resolution**: Added `vmIdleTimeout=3600000` (1 hour in ms) and `localhostForwarding=true` under `[wsl2]` in `C:\Users\Asus\.wslconfig`. Ran `wsl --shutdown` to apply, and restarted WSL. Localhost connections now successfully forward to the backend.
+
+
 
