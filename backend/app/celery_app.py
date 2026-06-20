@@ -19,3 +19,7 @@ celery_app.conf.update(
         "app.tasks.*": {"queue": "default"},
     }
 )
+
+# Import tasks to register them with the Celery app
+import app.tasks
+

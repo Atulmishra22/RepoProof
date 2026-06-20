@@ -80,9 +80,18 @@ This document tracks every commit made during the development of the **RepoProof
 
 ---
 
-## Planned Commit Structure
-As we implement the project, we will follow these structured commit points:
-1.  `feat: design database models and run initial migration` - Start of Phase 2.
-2.  `feat: build github api client wrapper` - Ingestion engine client.
+### Commit 7: Phase 2 Ingestion and WSL Stability
+*   **Hash**: `f094872`
+*   **Timestamp**: 2026-06-21 02:20:00 UTC+5:30
+*   **Message**: `Phase 2: Complete GitHub Ingestion and stabilize WSL/Redis environment`
+*   **Description**:
+    *   Designed user profile and repository tables (`User`, `Repository`, `AnalysisJob`) and applied the initial Alembic schema migration.
+    *   Implemented GitHub client wrapper to query user profile, public repositories, and raw profile README markdown.
+    *   Built FastAPI endpoints (`/users/ingest` and `/repositories`) and Celery task (`ingest_user_profile_task`) to fetch and store user profiles.
+    *   Stabilized the Redis health check in `docker-compose.yml` to prevent container restarts and cache key loss.
+    *   Configured the host Windows `.wslconfig` with `vmIdleTimeout=3600000` (1 hour) and `localhostForwarding=true` to prevent auto-shutdown and enable native host routing.
+    *   Created `seed_profile.py` inside the backend container to bypass rate-limits and cache the custom markdown README of `Atulmishra22`.
+    *   Upgraded the `/dashboard` Next.js frontend with premium dark styling, loading skeletons, and connection failure alerts.
+
 
 

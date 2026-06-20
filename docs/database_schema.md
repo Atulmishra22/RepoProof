@@ -4,6 +4,24 @@ This document describes the database design for the GitHub Repository Intelligen
 
 ---
 
+## Database Namespace Separation & Normalization Trade-offs
+
+To prevent schema conflicts and isolate concerns between our FastAPI backend and the Prisma-based Langfuse analytics dashboard, we separated their databases:
+1. **`repo_intel` Database**: Used by the FastAPI backend for application entities (`users`, `repositories`, `analysis_jobs`, etc.).
+2. **`langfuse` Database**: Used exclusively by the Langfuse telemetry server.
+
+### Dual User Tables & Normalization Rationale
+Because these databases are physically separate, a user record exists in two places:
+- `langfuse.users` (managed by Langfuse using text-based IDs to track dashboard admin access).
+- `repo_intel.users` (managed by the FastAPI application using UUID constraints to track repository ownership).
+
+While this duplicates user records, it is an intentional architectural trade-off to:
+- **Prevent Schema Conflicts**: Langfuse's internal Prisma migrations could otherwise modify table structures (e.g. changing user ID constraints), breaking backend foreign keys.
+- **Ensure Loose Coupling**: FastAPI's domain entities and Alembic migrations remain completely independent of the telemetry subsystem's lifecycle.
+- **Isolate Data Boundaries**: Telemetry and application logs are kept distinct from primary transactional user databases.
+
+---
+
 ## Database Enums
 
 Before defining tables, the following custom enum types are registered:

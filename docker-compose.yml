@@ -27,7 +27,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -128,7 +128,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres_dev_pass@postgres:5432/repo_intel
+      - DATABASE_URL=postgresql://postgres:postgres_dev_pass@postgres:5432/langfuse
       - NEXTAUTH_SECRET=langfuse_dev_secret_key
       - NEXTAUTH_URL=http://localhost:3000
       - SALT=langfuse_dev_salt_string

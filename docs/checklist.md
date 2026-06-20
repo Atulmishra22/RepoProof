@@ -16,14 +16,14 @@ This checklist tracks the implementation progress of the platform. Items will be
 
 ---
 
-## [ ] Phase 2: GitHub Ingestion
-- [ ] Implement database models for `users`, `repositories`, and `analysis_jobs`.
-- [ ] Write Alembic migration script to construct initial tables.
-- [ ] Build GitHub API client wrapper to fetch repository stats (stars, languages, metadata).
-- [ ] Implement `ingest_repository` Celery task.
-- [ ] Set up BFF REST route `POST /api/v1/repositories` to trigger ingestion.
-- [ ] Build Next.js Dashboard page showcasing repository status lists.
-- [ ] **First Milestone Test**: Submitting a GitHub link creates a repo entry and fetches accurate metadata.
+## [x] Phase 2: GitHub Ingestion
+- [x] Implement database models for `users`, `repositories`, and `analysis_jobs`.
+- [x] Write Alembic migration script to construct initial tables.
+- [x] Build GitHub API client wrapper to fetch user profile, public repositories, and raw profile README markdown.
+- [x] Implement `ingest_user_profile_task` Celery task.
+- [x] Set up BFF REST routes `POST /api/v1/users/ingest` and `GET /api/v1/repositories`.
+- [x] Build Next.js Dashboard page showcasing profile README, stats, and repository lists.
+- [x] **First Milestone Test**: Submitting a GitHub username triggers ingestion task, populates database, and caches profile README in Redis.
 
 ---
 
