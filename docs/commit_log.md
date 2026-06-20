@@ -28,12 +28,29 @@ This document tracks every commit made during the development of the **RepoProof
     *   [error_context.md](file:///d:/cold-mail/RepoProof/docs/error_context.md)
     *   [session_context.md](file:///d:/cold-mail/RepoProof/docs/session_context.md)
 
+### Commit 2: Commit Log Setup
+*   **Hash**: `a5de0fc`
+*   **Timestamp**: 2026-06-20 17:50:00 UTC+5:30
+*   **Message**: `docs: create commit log file to track changes`
+*   **Description**:
+    *   Created this commit log tracking document to maintain context for future iterations.
+
+### Commit 3: Backend Package Management Migration
+*   **Hash**: `5488025`
+*   **Timestamp**: 2026-06-20 18:27:00 UTC+5:30
+*   **Message**: `feat: migrate backend dependency management to uv and pyproject.toml`
+*   **Description**:
+    *   Created `backend/pyproject.toml` using standard PEP 621 tags to hold loose top-level dependencies.
+    *   Configured the `backend/Dockerfile` to fetch the binary of the Rust-based package manager `uv` and use it for dependency installation.
+    *   Wrote the initial FastAPI `app/main.py` entrypoint and Celery task client `app/celery_app.py`.
+    *   Set up root `docker-compose.yml` pre-wired for Postgres, Redis, MinIO, Celery and Langfuse.
+    *   Deleted the old `backend/requirements.txt` file.
+
 ---
 
 ## Planned Commit Structure
 As we implement the project, we will follow these structured commit points:
 1.  `docs: update git commit log` - Track log files.
-2.  `feat: init backend skeleton and requirements` - Base FastAPI structure.
-3.  `feat: init docker compose services configuration` - Docker setup files.
-4.  `feat: init frontend nextjs skeleton` - Next.js project startup.
-5.  `test: verify local foundation health checks` - Confirm end-to-end local system communication.
+2.  `feat: init frontend nextjs skeleton` - Next.js project startup.
+3.  `test: verify local foundation health checks` - Confirm end-to-end local system communication.
+
