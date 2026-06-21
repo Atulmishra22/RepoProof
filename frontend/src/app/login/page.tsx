@@ -32,6 +32,31 @@ export default function LoginPage() {
   const [formErrors, setFormErrors] = useState<ValidationErrors>({});
   const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>({});
 
+  const getPasswordStrength = (pass: string) => {
+    if (!pass) return { score: 0, label: "", color: "", text: "" };
+    let score = 0;
+    if (pass.length >= 6) score += 1;
+    if (pass.length >= 10) score += 1;
+    if (/[A-Z]/.test(pass)) score += 1;
+    if (/[0-9]/.test(pass)) score += 1;
+    if (/[^A-Za-z0-9]/.test(pass)) score += 1;
+
+    switch (score) {
+      case 1:
+        return { score: 20, label: "Weak", color: "bg-red-500", text: "text-red-400" };
+      case 2:
+        return { score: 40, label: "Fair", color: "bg-orange-500", text: "text-orange-400" };
+      case 3:
+        return { score: 60, label: "Good", color: "bg-yellow-500", text: "text-yellow-400" };
+      case 4:
+        return { score: 80, label: "Strong", color: "bg-blue-500", text: "text-blue-400" };
+      case 5:
+        return { score: 100, label: "Excellent", color: "bg-emerald-500", text: "text-emerald-400" };
+      default:
+        return { score: 0, label: "", color: "", text: "" };
+    }
+  };
+
   // Real-time Field Validation
   useEffect(() => {
     const errors: ValidationErrors = {};
@@ -342,6 +367,22 @@ export default function LoginPage() {
               {formErrors.password && (
                 <p className="mt-1 text-[11px] text-red-400 font-medium">{formErrors.password}</p>
               )}
+              {isRegistering && password && (
+                <div className="mt-2 space-y-1.5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <span className="text-zinc-500 font-medium">Password Strength:</span>
+                    <span className={`font-bold ${getPasswordStrength(password).text}`}>
+                      {getPasswordStrength(password).label}
+                    </span>
+                  </div>
+                  <div className="h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full ${getPasswordStrength(password).color} transition-all duration-300`}
+                      style={{ width: `${getPasswordStrength(password).score}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             {isRegistering && (
@@ -373,22 +414,35 @@ export default function LoginPage() {
             )}
 
             <div>
-              <label htmlFor="tier" className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">
+              <span className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-2">
                 Subscription Tier
-              </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 pointer-events-none">
-                  <Layers className="h-4 w-4 text-zinc-600" />
-                </span>
-                <select
-                  id="tier"
-                  value={tier}
-                  onChange={(e) => setTier(e.target.value)}
-                  className="block w-full h-11 pl-10 pr-4 rounded-xl border border-zinc-900 bg-zinc-900/10 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 text-sm transition-all outline-none appearance-none cursor-pointer"
+              </span>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setTier("FREE")}
+                  className={`flex flex-col items-center justify-center p-3.5 rounded-xl border transition-all duration-200 cursor-pointer ${
+                    tier === "FREE"
+                      ? "border-blue-500/50 bg-blue-950/20 text-white shadow-md shadow-blue-500/10"
+                      : "border-zinc-900 bg-zinc-900/10 hover:border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                  }`}
                 >
-                  <option value="FREE" className="bg-zinc-950">Free Tier (5 scans/hour)</option>
-                  <option value="PRO" className="bg-zinc-950">Pro Tier (100 scans/hour)</option>
-                </select>
+                  <span className="text-xs font-bold">Free Tier</span>
+                  <span className="text-[10px] text-zinc-500 mt-1">5 scans / hr</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setTier("PRO")}
+                  className={`flex flex-col items-center justify-center p-3.5 rounded-xl border transition-all duration-200 cursor-pointer ${
+                    tier === "PRO"
+                      ? "border-blue-500/50 bg-blue-950/20 text-white shadow-md shadow-blue-500/10"
+                      : "border-zinc-900 bg-zinc-900/10 hover:border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <span className="text-xs font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-indigo-400">Pro Tier</span>
+                  <span className="text-[10px] text-zinc-500 mt-1">100 scans / hr</span>
+                </button>
               </div>
             </div>
 
