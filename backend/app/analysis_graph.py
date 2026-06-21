@@ -17,7 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from app.database import SessionLocal
 from app.models import Repository, AnalysisJob, AnalysisStatus, JobStatus, GeneratedOutput, OutputType
 from app.checkpointer import get_checkpointer
-from app.llm_schemas import FactExtractionResult, LaTeXResumeResponse, LaTeXSelfHealingResponse, MarkdownOutputsResponse
+from app.llm_schemas import FactExtractionResult, LaTeXResumeResponse, LaTeXSelfHealingResponse, MarkdownOutputsResponse, SingleMarkdownResponse
 
 logger = logging.getLogger(__name__)
 
@@ -1124,4 +1124,315 @@ except Exception as e:
     analysis_graph = workflow.compile(
         interrupt_before=["await_human_review"]
     )  # Fallback to no checkpointer for compiling safety
+
+
+def regenerate_single_output(
+    output_id: str,
+    ats_mode: Optional[str] = None,
+    custom_instructions: Optional[str] = None
+) -> GeneratedOutput:
+    db = SessionLocal()
+    try:
+        # Fetch output
+        output = db.query(GeneratedOutput).filter(GeneratedOutput.id == output_id).first()
+        if not output:
+            raise ValueError("Output not found")
+            
+        # Get job & repo
+        job = db.query(AnalysisJob).filter(AnalysisJob.id == output.analysis_job_id).first()
+        if not job:
+            raise ValueError("Analysis job not found")
+            
+        repo = db.query(Repository).filter(Repository.id == job.repository_id).first()
+        if not repo:
+            raise ValueError("Repository not found")
+            
+        # Fetch approved facts from MinIO
+        s3 = get_s3_client()
+        bucket_name = "repoproof-data"
+        facts = []
+        try:
+            s3_resp = s3.get_object(Bucket=bucket_name, Key=f"repos/{repo.id}/analysis_result.json")
+            result_data = json.loads(s3_resp["Body"].read().decode("utf-8"))
+            facts = result_data.get("facts", [])
+        except Exception as s3_err:
+            logger.warning(f"Could not read analysis_result.json from MinIO: {s3_err}")
+            
+        # Fetch user info
+        user_name = "Developer"
+        user_email = ""
+        github_username = ""
+        bio = ""
+        
+        from app.models import User
+        user = db.query(User).filter(User.id == repo.user_id).first()
+        if user:
+            github_username = user.github_username or ""
+            user_email = user.email or ""
+            user_name = github_username
+            if github_username:
+                try:
+                    from app.redis_client import redis_client
+                    profile_str = redis_client.get(f"github_profile:{github_username}")
+                    if profile_str:
+                        profile_data = json.loads(profile_str)
+                        user_name = profile_data.get("name") or user_name
+                        user_email = profile_data.get("email") or user_email
+                        bio = profile_data.get("bio") or ""
+                except Exception as redis_err:
+                    logger.warning(f"Failed to fetch profile from Redis: {redis_err}")
+                    
+        # Helper for LLM Calls
+        def call_llm(messages: List[Dict[str, str]], schema: Any) -> Dict[str, Any]:
+            with propagate_attributes(user_id=str(repo.id), session_id=str(job.id)):
+                with langfuse.start_as_current_observation(
+                    as_type="generation",
+                    name="document_regeneration",
+                    model=MODEL_NAME,
+                    input=messages,
+                    model_parameters={"temperature": 0.2}
+                ) as generation:
+                    response = httpx.post(
+                        f"{LITELLM_PROXY_URL}/v1/chat/completions",
+                        json={
+                            "model": MODEL_NAME,
+                            "messages": messages,
+                            "temperature": 0.2,
+                            "response_format": {
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": schema.__name__,
+                                    "schema": schema.model_json_schema(),
+                                    "strict": True
+                                }
+                            }
+                        },
+                        timeout=120.0
+                    )
+                    response.raise_for_status()
+                    resp_data = response.json()
+                    
+                    usage = resp_data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    
+                    content = resp_data["choices"][0]["message"]["content"]
+                    parsed = json.loads(content)
+                    
+                    generation.update(
+                        output=content,
+                        usage_details={
+                            "input": prompt_tokens,
+                            "output": completion_tokens,
+                            "total": prompt_tokens + completion_tokens
+                        }
+                    )
+                    return {
+                        "parsed": parsed,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens
+                    }
+
+        facts_str = json.dumps(facts, indent=2)
+        start_time = time.time()
+        
+        if output.output_type == OutputType.RESUME_BULLETS:
+            # 1. Regenerate LaTeX Resume
+            messages_resume = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert Senior Technical Recruiter and professional LaTeX designer.\n"
+                        "Your task is to update or regenerate a LaTeX developer resume using the candidate's verified repository facts, "
+                        "their current LaTeX template source, and custom edit instructions.\n\n"
+                        "Step 1: ATS Optimizer Reasoning Pass\n"
+                        "Analyze the candidate's tech stack, code facts, current LaTeX source, and instructions. "
+                        "Choose the best action verbs and keep a strict single-page budget.\n\n"
+                        "Step 2: LaTeX Code Generation\n"
+                        "Generate a complete, compilation-ready LaTeX resume. Adjust spacing and margins to guarantee one page.\n"
+                        "Guidelines:\n"
+                        "- Adjust according to custom instructions.\n"
+                        "- Strictly limit length to one page.\n"
+                        "- Do NOT escape LaTeX characters in JSON (write \\section, not \\\\section, but make sure to escape special characters in LaTeX text properly like \\% for percent, \\& for ampersand, and \\_ for underscores)."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Candidate Name: {user_name}\n"
+                        f"Candidate Email: {user_email}\n"
+                        f"GitHub Link: github.com/{github_username}\n"
+                        f"LinkedIn Link: linkedin.com/in/{github_username}\n"
+                        f"Brief Bio: {bio}\n\n"
+                        f"Approved Technical Facts:\n{facts_str}\n\n"
+                        f"Current LaTeX Code:\n{output.content}\n\n"
+                        f"Custom Instructions: {custom_instructions or 'None'}\n"
+                        f"ATS Optimization Mode: {ats_mode or 'experienced'}\n\n"
+                        "Please output the updated LaTeX code in the structured JSON response format."
+                    )
+                }
+            ]
+            
+            logger.info("Calling LLM to regenerate LaTeX resume...")
+            res_resume = call_llm(messages_resume, LaTeXResumeResponse)
+            latex_code = res_resume["parsed"]["latex_code"]
+            prompt_tokens_res = res_resume["prompt_tokens"]
+            completion_tokens_res = res_resume["completion_tokens"]
+            
+            # Helper for compiler self-healing
+            def call_self_healing_llm(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+                return call_llm(messages, LaTeXSelfHealingResponse)
+                
+            def compile_latex(latex_content: str, output_dir: str) -> str:
+                tex_path = os.path.join(output_dir, "resume.tex")
+                with open(tex_path, "w", encoding="utf-8") as f:
+                    f.write(latex_content)
+                for i in range(2):
+                    res = subprocess.run(
+                        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "resume.tex"],
+                        cwd=output_dir,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    if res.returncode != 0:
+                        log_path = os.path.join(output_dir, "resume.log")
+                        log_tail = ""
+                        if os.path.exists(log_path):
+                            with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                                lines = lf.readlines()
+                                log_tail = "".join(lines[-30:])
+                        raise RuntimeError(f"pdflatex compilation failed (exit code {res.returncode}):\n{log_tail}")
+                pdf_path = os.path.join(output_dir, "resume.pdf")
+                return pdf_path
+
+            compile_success = False
+            error_log = ""
+            retry_count = 0
+            max_retries = 3
+            pdf_bytes = b""
+            
+            while not compile_success and retry_count <= max_retries:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    try:
+                        pdf_path = compile_latex(latex_code, tmpdir)
+                        with open(pdf_path, "rb") as pdf_file:
+                            pdf_bytes = pdf_file.read()
+                        compile_success = True
+                    except Exception as compile_err:
+                        error_log = str(compile_err)
+                        if retry_count == max_retries:
+                            break
+                        retry_count += 1
+                        messages_healing = [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an expert LaTeX compiler and troubleshooter.\n"
+                                    "The user is trying to compile a LaTeX resume, but the compilation failed with a pdflatex error.\n"
+                                    "Analyze the invalid LaTeX code and the compiler log tail, diagnose the root cause, and output the corrected, complete LaTeX code.\n\n"
+                                    "Important guidelines:\n"
+                                    "- Do NOT truncate or write partial code. Output the COMPLETE corrected LaTeX source code.\n"
+                                    "- Ensure it adheres strictly to a single-page budget."
+                                )
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"--- INVALID LATEX CODE ---\n{latex_code}\n\n"
+                                    f"--- COMPILER LOG ERROR ---\n{error_log}\n\n"
+                                    "Please output the corrected LaTeX code in the structured JSON response format."
+                                )
+                            }
+                        ]
+                        res_healing = call_self_healing_llm(messages_healing)
+                        latex_code = res_healing["parsed"]["latex_code"]
+                        prompt_tokens_res += res_healing["prompt_tokens"]
+                        completion_tokens_res += res_healing["completion_tokens"]
+                        
+            if not compile_success:
+                raise RuntimeError(f"LaTeX compilation failed after {max_retries} retries. Error: {error_log}")
+                
+            # Upload to MinIO
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=output.minio_object_key,
+                Body=pdf_bytes,
+                ContentType="application/pdf"
+            )
+            # Also upload the updated tex file
+            tex_key = output.minio_object_key.replace(".pdf", ".tex")
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=tex_key,
+                Body=latex_code,
+                ContentType="application/x-tex"
+            )
+            
+            output.content = latex_code
+            output.prompt_tokens = prompt_tokens_res
+            output.completion_tokens = completion_tokens_res
+            
+        else:
+            # Markdown outputs (LinkedIn, README, Portfolio)
+            doc_names = {
+                OutputType.LINKEDIN_DESC: "LinkedIn Project Description",
+                OutputType.README: "GitHub Profile README",
+                OutputType.PORTFOLIO_DOC: "Developer Portfolio Page"
+            }
+            doc_name = doc_names.get(output.output_type, "Document")
+            
+            messages_md = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a stellar Developer Relations Manager and copywriter.\n"
+                        f"Your task is to update or regenerate a {doc_name} for the candidate, "
+                        "using their approved technical facts, the existing document content, and custom edit instructions.\n\n"
+                        "Make sure to output the updated complete document under the `content` JSON field."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Project Owner: {user_name}\n"
+                        f"Project URL: {repo.github_url}\n"
+                        f"Approved Technical Facts:\n{facts_str}\n\n"
+                        f"Current Document Content:\n{output.content}\n\n"
+                        f"Custom Edit Instructions:\n{custom_instructions or 'None'}\n\n"
+                        "Please output the updated content in the structured JSON response format."
+                    )
+                }
+            ]
+            
+            res_md = call_llm(messages_md, SingleMarkdownResponse)
+            new_content = res_md["parsed"]["content"]
+            
+            # Upload to MinIO
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=output.minio_object_key,
+                Body=new_content,
+                ContentType="text/markdown"
+            )
+            
+            output.content = new_content
+            output.prompt_tokens = res_md["prompt_tokens"]
+            output.completion_tokens = res_md["completion_tokens"]
+            
+        output.version += 1
+        output.generation_duration_ms = int((time.time() - start_time) * 1000)
+        output.updated_at = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(output)
+        return output
+        
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Error regenerating output {output_id}: {e}")
+        raise e
+    finally:
+        db.close()
+
 

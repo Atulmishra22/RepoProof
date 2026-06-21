@@ -66,3 +66,8 @@ class MarkdownOutputsResponse(BaseModel):
     linkedin_summary: str = Field(description="A professional, compelling LinkedIn project description / profile summary featuring the highlights of the project.")
     github_readme: str = Field(description="A polished, comprehensive markdown README.md for the repository highlighting architecture, installation, features, and quickstart.")
     developer_portfolio: str = Field(description="A beautiful markdown developer portfolio page detailing the project's features, tech stack, complexity, and design choices.")
+
+
+class SingleMarkdownResponse(BaseModel):
+    content: str = Field(description="The updated generated document content in markdown format.")
+
