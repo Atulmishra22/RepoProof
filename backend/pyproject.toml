@@ -24,6 +24,9 @@ dependencies = [
     "structlog==26.1.0",
     "prometheus-client==0.25.0",
     "httpx==0.28.1",
+    "langgraph-checkpoint-postgres>=2.0.15",
+    "psycopg[binary]>=3.1.18",
+    "GitPython==3.1.44",
 ]
 
 [tool.uv]

@@ -147,3 +147,92 @@ def ingest_user_profile_task(username: str):
         return {"status": "error", "message": str(e)}
     finally:
         db.close()
+
+
+@celery_app.task(name="app.tasks.run_analysis_workflow_task")
+def run_analysis_workflow_task(repository_id: str, job_id: str):
+    """
+    Background task to run the LangGraph repository analysis workflow.
+    Performs checkout, heuristic scanning, and MinIO uploads, while persisting state checkpoints.
+    """
+    logger.info(f"Starting analysis workflow task. Repository: {repository_id}, Job: {job_id}")
+    db = SessionLocal()
+    
+    # 1. Update Job Status to RUNNING
+    try:
+        from app.models import AnalysisJob, JobStatus
+        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+            "status": JobStatus.RUNNING,
+            "started_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        })
+        db.commit()
+    except Exception as e:
+        logger.exception(f"Failed to initialize analysis job status: {e}")
+        db.close()
+        return {"status": "error", "message": f"Job initialization error: {str(e)}"}
+
+    try:
+        from app.models import Repository
+        from app.analysis_graph import analysis_graph
+        
+        # 2. Fetch Repository details
+        repo = db.query(Repository).filter(Repository.id == repository_id).first()
+        if not repo:
+            raise ValueError(f"Repository {repository_id} not found in database.")
+            
+        # 3. Setup LangGraph thread configuration
+        config = {"configurable": {"thread_id": job_id}}
+        
+        # 4. Invoke graph
+        inputs = {
+            "repository_id": repository_id,
+            "github_url": repo.github_url,
+            "default_branch": repo.default_branch,
+            "local_path": "",
+            "file_tree": {},
+            "extracted_facts": [],
+            "status": "queued",
+            "error": None
+        }
+        
+        logger.info(f"Invoking LangGraph orchestrator thread {job_id}...")
+        final_state = analysis_graph.invoke(inputs, config)
+        
+        # 5. Handle execution results
+        error = final_state.get("error")
+        if error:
+            raise RuntimeError(error)
+            
+        logger.info(f"LangGraph execution finished successfully for thread {job_id}.")
+        
+        # 6. Update Job Status to COMPLETE
+        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+            "status": JobStatus.COMPLETE,
+            "completed_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        })
+        db.commit()
+        return {"status": "success", "job_id": job_id}
+        
+    except Exception as e:
+        logger.exception(f"Unexpected error in run_analysis_workflow_task for job {job_id}: {e}")
+        db.rollback()
+        
+        # Mark job as failed in PostgreSQL
+        try:
+            from app.models import AnalysisJob, JobStatus
+            db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                "status": JobStatus.FAILED,
+                "error_message": str(e),
+                "completed_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            })
+            db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to log job failure to database: {db_err}")
+            
+        return {"status": "error", "job_id": job_id, "message": str(e)}
+    finally:
+        db.close()
+

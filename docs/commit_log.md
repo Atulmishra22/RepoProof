@@ -93,5 +93,18 @@ This document tracks every commit made during the development of the **RepoProof
     *   Created `seed_profile.py` inside the backend container to bypass rate-limits and cache the custom markdown README of `Atulmishra22`.
     *   Upgraded the `/dashboard` Next.js frontend with premium dark styling, loading skeletons, and connection failure alerts.
 
+### Commit 8: Phase 3 LangGraph Analysis Pipeline and Frontend Real-time Polling
+*   **Hash**: `e5b83a1`
+*   **Timestamp**: 2026-06-21 13:00:00 UTC+5:30
+*   **Message**: `feat: complete Phase 3 Analysis Pipeline and frontend integration`
+*   **Description**:
+    *   Set up LangGraph 0.2+ orchestrator with PostgreSQL State Checkpointer (`PostgresSaver`) and psycopg connection pool.
+    *   Wrote repository cloning logic and directory structure walker nodes to construct flat file tree JSON, uploading it to MinIO storage.
+    *   Implemented heuristic facts extraction node scanning for packages, frameworks, dependencies, and file metrics.
+    *   Added Celery task wrapper and API endpoints (`POST /repositories/{id}/analyze` and `GET /repositories/{id}/analysis/{job_id}`).
+    *   Extended main database router to self-heal stalled background analysis tasks.
+    *   Connected frontend dashboard cards to trigger analysis, recover active jobs, poll real-time status, and display currently executing LangGraph nodes.
+
+
 
 
