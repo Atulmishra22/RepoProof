@@ -109,6 +109,12 @@ The following custom metrics are exposed by the FastAPI application on the `/met
 *   **PURPOSE**: Tracks object storage consumption.
 *   **ALERT**: `r2_storage_bytes_total{bucket="raw-repositories"} > 8000000000` (triggers alert if temporary repositories exceed 8GB, indicating cleanup tasks are failing).
 
+### 9. `latex_compilation_retry_total`
+*   **TYPE**: Counter
+*   **LABELS**: `status` (success, failure), `attempt` (1, 2, 3)
+*   **PURPOSE**: Tracks the count of LaTeX compiler execution retries inside the self-healing retry loop.
+*   **ALERT**: None.
+
 ---
 
 ## 7.3 Structured Log Format
@@ -188,4 +194,21 @@ We use `structlog` in Python to output JSON logs to stdout. This enables unified
   "failed_node": "extract_code_facts",
   "retry_attempt": 3
 }
+```
+
+### 5. LaTeX Self-Healing Attempt
+```json
+{
+  "timestamp": "2026-06-18T19:15:20.401Z",
+  "level": "warning",
+  "service": "celery-worker",
+  "trace_id": "9a38f32c-3543-4ef3-bde8-d73111f18579",
+  "job_id": "job_09e45be0-8669-42b7-873b-e01db109ce4a",
+  "message": "LaTeX compilation failed. Initiating AI self-healing repair loop.",
+  "attempt": 1,
+  "exit_code": 1,
+  "last_log_lines": "! Undefined control sequence.\nl.15 \\invalidmacro\n",
+  "diagnosed_cause": "The generated LaTeX code contains an undefined control sequence \\invalidmacro on line 15."
+}
+```
 ```

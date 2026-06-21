@@ -17,62 +17,38 @@ This document details the frontend architecture for the GitHub Repository Intell
 ### 2. Dashboard Page
 *   **ROUTE**: `/dashboard`
 *   **COMPONENT**: `DashboardPage`
-*   **PURPOSE**: Displays a list of the user's analyzed repositories, their indexing state, and shortcuts to view results or start a new analysis.
-*   **AUTH**: required
-*   **QUERIES**: `GET /api/v1/repositories` (list user repos)
-*   **MUTATIONS**: `DELETE /api/v1/repositories/{id}` (remove repository entry)
-
-### 3. Submit Repository Page
-*   **ROUTE**: `/repositories/new`
-*   **COMPONENT**: `NewRepositoryPage`
-*   **PURPOSE**: Forms interface allowing the user to submit a public GitHub repository link for analysis.
-*   **AUTH**: required
-*   **QUERIES**: None.
-*   **MUTATIONS**: `POST /api/v1/repositories` (register repository URL)
-
-### 4. Repository Analysis Status Page
-*   **ROUTE**: `/repositories/[id]`
-*   **COMPONENT**: `RepositoryStatusPage`
-*   **PURPOSE**: Real-time progress tracker monitoring the active LangGraph execution steps via WebSockets.
+*   **PURPOSE**: Displays a list of the user's analyzed repositories, their indexing state, real-time status/progress indicators, and inputs to discover/ingest new repositories.
 *   **AUTH**: required
 *   **QUERIES**: 
-    *   `GET /api/v1/repositories/{id}` (get repository profile)
-    *   `GET /api/v1/repositories/{id}/analysis/{job_id}` (get active job metadata)
-*   **MUTATIONS**: `POST /api/v1/repositories/{id}/analyze` (trigger a new run)
+    *   `GET /api/v1/repositories?username=...` (list user repos & sync profile details)
+    *   `GET /api/v1/repositories/{id}/analysis-result` (get facts array when job is complete)
+    *   `GET /api/v1/repositories/{id}/analysis/{job_id}` (poll status check during active runs)
+*   **MUTATIONS**: 
+    *   `POST /api/v1/users/ingest` (trigger background profile sync task)
+    *   `POST /api/v1/repositories/{id}/analyze` (start analysis workflow)
 
-### 5. Repository Review Page (HiTL Portal)
-*   **ROUTE**: `/repositories/[id]/review`
+### 3. Repository Review Page (HiTL Portal)
+*   **ROUTE**: `/dashboard/review/[jobId]`
 *   **COMPONENT**: `RepositoryReviewPage`
 *   **PURPOSE**: Interactive, checklist-driven layout where users inspect, modify, and confirm AI-extracted code facts.
 *   **AUTH**: required
 *   **QUERIES**:
-    *   `GET /api/v1/reviews/pending` (find target active review id)
-    *   `GET /api/v1/reviews/{review_id}` (retrieve facts checklist)
+    *   `GET /api/v1/reviews/{job_id}` (retrieve facts checklist for review)
 *   **MUTATIONS**:
-    *   `PATCH /api/v1/reviews/{review_id}/facts` (submit approved/edited/rejected facts payload)
-    *   `POST /api/v1/reviews/{review_id}/reject` (reject entire run)
+    *   `PATCH /api/v1/reviews/{job_id}/facts` (submit approved/edited facts payload and resume pipeline)
+    *   `POST /api/v1/reviews/{job_id}/chat` (interactive AI sidebar chat in context of facts)
 
-### 6. Outputs Portal Page
-*   **ROUTE**: `/repositories/[id]/outputs`
+### 4. Outputs Portal Page
+*   **ROUTE**: `/dashboard/outputs/[repoId]`
 *   **COMPONENT**: `OutputsPage`
-*   **PURPOSE**: Multi-tab interface displaying generated technical copy: Resume Bullets, LinkedIn Project Summary, README.md, and Portfolio Page.
+*   **PURPOSE**: Premium multi-tab interface displaying generated technical copy: Resume Bullets (with PDF download), LinkedIn Project Summary, README.md, and Developer Portfolio Page.
 *   **AUTH**: required
 *   **QUERIES**:
     *   `GET /api/v1/repositories/{id}/outputs` (list outputs)
     *   `GET /api/v1/outputs/{output_id}` (fetch active output content)
 *   **MUTATIONS**:
-    *   `POST /api/v1/outputs/{output_id}/regenerate` (trigger version bump run)
-    *   `GET /api/v1/outputs/{output_id}/download` (retrieve S3 presigned URL)
-
-### 7. Settings Page
-*   **ROUTE**: `/settings`
-*   **COMPONENT**: `SettingsPage`
-*   **PURPOSE**: Details user profile settings, account linkages, API usage limits, and daily token metrics.
-*   **AUTH**: required
-*   **QUERIES**: 
-    *   `GET /api/v1/auth/me` (retrieve user profile details)
-    *   `GET /api/v1/usage_metrics` (fetch API token spending records)
-*   **MUTATIONS**: None.
+    *   `POST /api/v1/outputs/{output_id}/regenerate` (trigger version bump run with custom comments)
+    *   `GET /api/v1/outputs/{output_id}/download` (retrieve presigned Cloudflare R2 URL)
 
 ---
 
@@ -258,7 +234,7 @@ export const queryKeys = {
         },
         onSuccess: (data) => {
           toast.success("Facts approved! Resuming pipeline...");
-          router.push(`/repositories/${data.repository_id}/status`);
+          router.push(`/dashboard`);
         },
         onSettled: () => {
           queryClient.invalidateQueries({ queryKey: queryKeys.reviews.all });
@@ -268,7 +244,7 @@ export const queryKeys = {
     ```
 
 2.  **Output Re-generation (`POST /outputs/{id}/regenerate`)**:
-    *   Triggers job spin-up. Invalidates `queryKeys.outputs.list` and navigates to the Status page to display the compilation progress.
+    *   Triggers job spin-up. Invalidates `queryKeys.outputs.list` and navigates to the dashboard to monitor progress.
 
 3.  **Get Presigned Download Link (`GET /outputs/{id}/download`)**:
     *   Initiated on user click. Does not modify cache states. Safely opens the fetched presigned URL in a secure, target-blank browser tab for download routing.
@@ -278,9 +254,9 @@ export const queryKeys = {
 ## 4.4 The Review Page — Detailed UX Flow
 
 1.  **Landing**:
-    *   The user is on the platform and receives a `review_required` WebSocket event notification, or they land directly on `/repositories/[id]/review` via the status page link.
+    *   The user is on the platform and receives a `review_required` WebSocket event notification, or they land directly on `/dashboard/review/[jobId]` via the dashboard link.
 2.  **Loading Data**:
-    *   The page mounts and displays a skeleton loading layout. It queries `GET /api/v1/reviews/{review_id}` to fetch the list of facts.
+    *   The page mounts and displays a skeleton loading layout. It queries `GET /api/v1/reviews/{job_id}` to fetch the list of facts.
 3.  **Initializing State**:
     *   The retrieved facts are loaded into the local Zustand `useReviewStore`. The page displays the layout: 
         *   **Left Column**: A vertical list of facts (FactList).
@@ -291,7 +267,7 @@ export const queryKeys = {
 5.  **Review Decision Input**:
     *   The user reviews the statement. They have three direct actions:
         *   **Approve**: Marks the fact as verified (turns card background to green).
-        *   **Reject**: Excludes the fact from document compiler input contexts (turns card background to muted red).
+        *   **Reject**: Toggles the card to reject it from outputs (turns card background to muted red).
         *   **Edit**: Toggles the card text block into a text input, permitting inline textual corrections. Once corrected and saved, the card updates to an 'edited' state (turns background to blue).
 6.  **Summary Calculation**:
     *   As the user proceeds, the `ReviewSummary` bar dynamically updates: `12 / 15 Facts Reviewed (10 Approved, 1 Edited, 1 Rejected, 3 Pending)`. The main **Confirm Facts and Generate Resume** CTA button remains disabled.
@@ -300,8 +276,8 @@ export const queryKeys = {
 8.  **Optimistic Dispatch**:
     *   When the user clicks the submit button:
         1.  The UI shows a loading spinner on the button.
-        2.  The mutation is dispatched to `PATCH /api/v1/reviews/{review_id}/facts`.
-        3.  The client optimistically updates the cache and immediately routes the user back to the Status page `/repositories/[id]`.
+        2.  The mutation is dispatched to `PATCH /api/v1/reviews/{job_id}/facts`.
+        3.  The client optimistically updates the cache and immediately routes the user back to the Dashboard page `/dashboard`.
 9.  **Error Recovery**:
     *   If the backend throws a database transaction timeout or a validation failure (e.g. 500/400 error):
         1.  The router halts the redirection.

@@ -31,8 +31,8 @@ This document describes the storage architecture for the platform. We utilize Cl
 ### 3. `generated-outputs`
 *   **BUCKET**: `generated-outputs`
 *   **PURPOSE**: Stores the finalized copies of generated resumes, LinkedIn summaries, readmes, and portfolio pages.
-*   **CONTENTS**: `.md` (Markdown) and `.txt` files.
-*   **NAMING**: `outputs/{user_id}/{job_id}/{output_id}_v{version}.md`
+*   **CONTENTS**: `.md` (Markdown), `.txt` files, and compiled `.pdf` documents.
+*   **NAMING**: `outputs/{user_id}/{job_id}/{output_id}_v{version}.{extension}` (where extension is `md`, `txt`, or `pdf`).
 *   **RETENTION**: Kept indefinitely, or deleted when the user manually deletes the repository or their account.
 *   **ACCESS**: private (presigned URL access only).
 *   **PRESIGNED**: Generated on-demand with a **15-minute expiration** window.

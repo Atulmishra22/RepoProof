@@ -20,15 +20,17 @@
 ---
 
 ## 2. Current Status
-*   **Current Phase**: Phase 2: GitHub Ingestion
-*   **Checklist State**: Located at [checklist.md](file:///d:/cold-mail/RepoProof/docs/checklist.md) (Phase 1 completed, Phase 2 pending).
-*   **Last Action Taken**: Completed Phase 1: Foundation. Initialized Alembic database migrations, enriched `/api/v1/health` with deep Postgres + Redis connection status checks, scaffolded the Next.js 16 frontend with Tailwind CSS v4, and resolved Langfuse's ClickHouse startup requirements by pinning to image version `2`.
+*   **Current Phase**: Phase 6: Output Generation (Pending Execution)
+*   **Checklist State**: Located at [checklist.md](file:///d:/cold-mail/RepoProof/docs/checklist.md) (Phases 1-5 completed, Phase 6 checklist updated and pending execution).
+*   **Last Action Taken**: Completed Phase 5: Human-In-The-Loop. Integrated the `await_human_review` interrupt checkpoint inside LangGraph, built the FastAPI WebSocket channel for real-time notifications via Redis Pub/Sub, and created the premium interactive Review interface on the frontend. The implementation plan for Phase 6 is approved.
 *   **Runtime Logs & Errors**: Tracked in [error_context.md](file:///d:/cold-mail/RepoProof/docs/error_context.md).
 
 ---
 
 ## 3. Handover Instruction: Where to Resume
-When the user gives the command to resume, you must execute **Phase 2: GitHub Ingestion** tasks:
-1.  **Implement Models**: Write SQLAlchemy models for `users`, `repositories`, and `analysis_jobs` inside `/backend/app/models.py`.
-2.  **Generate Migration**: Create and run the Alembic migration scripts to create the database tables.
-3.  **GitHub API Wrapper**: Build the GitHub API client wrapper to fetch repo stats.
+When the user gives the command to resume, you must execute **Phase 6: Output Generation** tasks:
+1.  **Database Models & Migration**: Define `GeneratedOutput` and `OutputDownload` in [models.py](file:///d:/cold-mail/RepoProof/backend/app/models.py), run Alembic migration inside the backend container.
+2.  **Docker LaTeX Configuration**: Update [Dockerfile](file:///d:/cold-mail/RepoProof/backend/Dockerfile) to install `texlive-latex-base`, `texlive-fonts-recommended`, and `texlive-latex-extra` for LaTeX resume generation.
+3.  **LangGraph Nodes & AI Self-Healing**: Implement `compile_documents_node` in [analysis_graph.py](file:///d:/cold-mail/RepoProof/backend/app/analysis_graph.py). Add the ATS reasoning optimizer and the 3-step AI self-healing compiler retry loop (using LaTeX compile log diagnostics, persisting errors in `AnalysisJob.error_message`).
+4.  **Backend REST API**: Implement endpoints for retrieving, regenerating, downloading outputs, and zipping all outputs in [main.py](file:///d:/cold-mail/RepoProof/backend/app/main.py).
+5.  **Frontend Outputs UI**: Create the premium outputs page at `frontend/src/app/dashboard/outputs/[repoId]/page.tsx` with tabs, code previews, and download triggers.
