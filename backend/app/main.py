@@ -282,5 +282,46 @@ async def get_repository_analysis_status(
     }
 
 
+@router.get("/repositories/{id}/analysis-result", tags=["analysis"])
+async def get_repository_analysis_result(
+    id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches the compiled analysis result (extracted facts, suggested questions, and cost metrics)
+    from MinIO storage for a given repository.
+    """
+    repo = db.query(Repository).filter(Repository.id == id).first()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found."
+        )
+
+    from app.analysis_graph import get_s3_client
+    try:
+        s3 = get_s3_client()
+        bucket_name = "repoproof-data"
+        s3_key = f"repos/{id}/analysis_result.json"
+        
+        response = s3.get_object(Bucket=bucket_name, Key=s3_key)
+        result_data = json.loads(response["Body"].read().decode("utf-8"))
+        return result_data
+    except s3.exceptions.NoSuchKey:
+        # Fallback if result has not been uploaded yet
+        return {
+            "facts": [],
+            "suggested_questions": [],
+            "llm_tokens_used": 0,
+            "llm_cost_usd": 0.0
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch analysis result: {str(e)}"
+        )
+
+
 app.include_router(router)
+
 
