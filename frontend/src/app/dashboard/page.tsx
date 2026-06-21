@@ -39,6 +39,50 @@ export default function DashboardPage() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [activeJobs, setActiveJobs] = useState<Record<string, { jobId: string; currentNode: string | null }>>({});
 
+  // Analysis result states
+  const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<{
+    facts: Array<{
+      category: string;
+      claim: string;
+      source_file: string;
+      snippet: string;
+      ats_impact: string;
+    }>;
+    suggested_questions: string[];
+    llm_tokens_used: number;
+    llm_cost_usd: number;
+  } | null>(null);
+  const [loadingResult, setLoadingResult] = useState(false);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+
+  const handleViewResults = async (repo: Repository) => {
+    setSelectedRepo(repo);
+    setLoadingResult(true);
+    setAnalysisResult(null);
+    setCopiedIndex(null);
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repo.id}/analysis-result`);
+      if (response.ok) {
+        const data = await response.json();
+        setAnalysisResult(data);
+      } else {
+        alert("Failed to fetch analysis results.");
+      }
+    } catch (err) {
+      console.error("Error fetching analysis result:", err);
+      alert("Failed to connect to backend to fetch results.");
+    } finally {
+      setLoadingResult(false);
+    }
+  };
+
+  const copyToClipboard = (text: string, index: number) => {
+    navigator.clipboard.writeText(text);
+    setCopiedIndex(index);
+    setTimeout(() => setCopiedIndex(null), 2000);
+  };
+
   const fetchUserData = async (username: string) => {
     setLoading(true);
     setConnectionError(null);
@@ -537,17 +581,26 @@ export default function DashboardPage() {
                           {repo.star_count}
                         </span>
                         
-                        <button
-                          onClick={() => handleAnalyze(repo.id)}
-                          disabled={repo.analysis_status === "analyzing"}
-                          className={`transition-all bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-3 py-1 rounded transition-colors duration-150 ${
-                            repo.analysis_status === "analyzing"
-                              ? "opacity-50 cursor-not-allowed"
-                              : "opacity-0 group-hover:opacity-100"
-                          }`}
-                        >
-                          {repo.analysis_status === "analyzing" ? "Analyzing..." : "Analyze"}
-                        </button>
+                        {repo.analysis_status === "complete" ? (
+                          <button
+                            onClick={() => handleViewResults(repo)}
+                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-3.5 py-1.5 rounded transition-colors shadow-[0_0_8px_rgba(16,185,129,0.3)]"
+                          >
+                            View Results
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleAnalyze(repo.id)}
+                            disabled={repo.analysis_status === "analyzing"}
+                            className={`transition-all bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-3.5 py-1.5 rounded transition-colors duration-150 shadow-[0_0_8px_rgba(37,99,235,0.3)] ${
+                              repo.analysis_status === "analyzing"
+                                ? "opacity-50 cursor-not-allowed"
+                                : "opacity-0 group-hover:opacity-100"
+                            }`}
+                          >
+                            {repo.analysis_status === "analyzing" ? "Analyzing..." : "Analyze"}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -558,6 +611,201 @@ export default function DashboardPage() {
 
         </div>
       </main>
+
+      {/* Premium Analysis Results Modal */}
+      {selectedRepo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-sm animate-fade-in">
+          <div className="relative w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900/95 p-6 shadow-2xl backdrop-blur-md flex flex-col justify-between scrollbar-thin scrollbar-thumb-zinc-800">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-zinc-800 pb-4 mb-5">
+              <div>
+                <h3 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
+                  <span className="bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-indigo-400">
+                    {selectedRepo.name}
+                  </span>
+                  <span className="text-zinc-500 text-xs font-normal">analysis details</span>
+                </h3>
+                <a
+                  href={selectedRepo.github_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-zinc-400 hover:text-cyan-400 font-mono flex items-center gap-1.5 mt-1"
+                >
+                  {selectedRepo.github_url}
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                </a>
+              </div>
+              
+              <button
+                onClick={() => setSelectedRepo(null)}
+                className="rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition-all"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            {loadingResult ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />
+                <p className="text-sm text-zinc-400 font-medium">Fetching analysis results from storage...</p>
+              </div>
+            ) : analysisResult ? (
+              <div className="space-y-6">
+                
+                {/* Cost and Usage Metrics Banner */}
+                <div className="grid grid-cols-3 gap-4 rounded-xl border border-zinc-800/80 bg-zinc-950/50 p-4 text-center">
+                  <div>
+                    <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Analysis Cost</span>
+                    <span className="mt-1 block text-md font-bold text-emerald-400 font-mono">
+                      ${analysisResult.llm_cost_usd.toFixed(6)}
+                    </span>
+                  </div>
+                  <div className="border-x border-zinc-800">
+                    <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Tokens Consumed</span>
+                    <span className="mt-1 block text-md font-bold text-blue-400 font-mono">
+                      {analysisResult.llm_tokens_used.toLocaleString()}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Model Used</span>
+                    <span className="mt-1 block text-xs font-bold text-zinc-300">
+                      gemini-3.1-flash-lite
+                    </span>
+                  </div>
+                </div>
+
+                {/* Extracted Facts (ATS Resume Feed) */}
+                <div>
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400 mb-3.5 flex items-center gap-2">
+                    <svg className="h-4 w-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    ATS Resume Bullet Points & Fact Claims ({analysisResult.facts?.length || 0})
+                  </h4>
+                  
+                  {(!analysisResult.facts || analysisResult.facts.length === 0) ? (
+                    <p className="text-xs text-zinc-500 italic p-4 border border-zinc-850 rounded-xl bg-zinc-950/20 text-center">
+                      No facts could be validated for this repository.
+                    </p>
+                  ) : (
+                    <div className="space-y-4">
+                      {analysisResult.facts.map((fact, idx) => {
+                        // Category colors
+                        const categoryStyles: Record<string, string> = {
+                          technology_used: "bg-amber-950/30 text-amber-400 border-amber-900/30",
+                          architecture_pattern: "bg-purple-950/30 text-purple-400 border-purple-900/30",
+                          complexity_metric: "bg-cyan-950/30 text-cyan-400 border-cyan-900/30",
+                          contribution: "bg-blue-950/30 text-blue-400 border-blue-900/30",
+                          performance_optimization: "bg-emerald-950/30 text-emerald-400 border-emerald-900/30",
+                          security_hardening: "bg-rose-950/30 text-rose-400 border-rose-900/30",
+                          cost_saving: "bg-teal-950/30 text-teal-400 border-teal-900/30",
+                        };
+                        const badgeStyle = categoryStyles[fact.category] || "bg-zinc-950/30 text-zinc-400 border-zinc-900";
+
+                        return (
+                          <div 
+                            key={idx} 
+                            className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 hover:bg-zinc-900/60 transition-colors"
+                          >
+                            {/* Card Header: Category & Copy button */}
+                            <div className="flex items-center justify-between mb-2">
+                              <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${badgeStyle}`}>
+                                {fact.category.replace("_", " ")}
+                              </span>
+                              
+                              <button
+                                onClick={() => copyToClipboard(fact.claim, idx)}
+                                className={`text-[10px] font-semibold px-2 py-1 rounded border transition-all flex items-center gap-1.5 ${
+                                  copiedIndex === idx
+                                    ? "bg-green-950/20 border-green-800 text-green-400"
+                                    : "bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700"
+                                }`}
+                              >
+                                {copiedIndex === idx ? (
+                                  <>
+                                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    Copied!
+                                  </>
+                                ) : (
+                                  <>
+                                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                                    </svg>
+                                    Copy Bullet Point
+                                  </>
+                                )}
+                              </button>
+                            </div>
+
+                            {/* Bullet point claim */}
+                            <p className="text-sm font-semibold text-zinc-100 pr-2 leading-relaxed">
+                              {fact.claim}
+                            </p>
+
+                            {/* ATS Impact explanation */}
+                            <div className="mt-3 rounded-lg bg-zinc-950/40 border border-zinc-850 p-3">
+                              <span className="block text-[9px] font-semibold uppercase tracking-wider text-zinc-500">ATS impact & Expertise profile</span>
+                              <p className="mt-1 text-xs text-zinc-400 leading-relaxed">{fact.ats_impact}</p>
+                            </div>
+
+                            {/* Evidence Code Snippet */}
+                            {fact.source_file && fact.snippet && (
+                              <div className="mt-3">
+                                <span className="text-[10px] font-bold text-zinc-500 flex items-center gap-1.5 mb-1.5 font-mono">
+                                  <svg className="h-3 w-3 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                                  </svg>
+                                  Citation: {fact.source_file}
+                                </span>
+                                <div className="rounded-lg bg-zinc-950 p-3 border border-zinc-900 overflow-x-auto text-[10px] font-mono text-zinc-300 leading-relaxed scrollbar-thin scrollbar-thumb-zinc-800">
+                                  <pre className="whitespace-pre">{fact.snippet}</pre>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Developer Feedback Questions */}
+                {analysisResult.suggested_questions && analysisResult.suggested_questions.length > 0 && (
+                  <div className="border-t border-zinc-800 pt-5">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400 mb-3 flex items-center gap-2">
+                      <svg className="h-4 w-4 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      Developer Verification & Follow-up Questions
+                    </h4>
+                    <ul className="space-y-2.5">
+                      {analysisResult.suggested_questions.map((question, qIdx) => (
+                        <li 
+                          key={qIdx} 
+                          className="rounded-lg bg-indigo-950/10 border border-indigo-900/30 p-3.5 text-xs text-zinc-300 leading-relaxed flex items-start gap-2.5"
+                        >
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-900/30 text-[9px] font-bold text-indigo-400 shrink-0">
+                            {qIdx + 1}
+                          </span>
+                          <span>{question}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
