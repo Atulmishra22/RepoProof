@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from sqlalchemy import String, Integer, BigInteger, Boolean, DateTime, Numeric, ForeignKey, Enum, text
+from sqlalchemy import String, Integer, BigInteger, Boolean, DateTime, Numeric, ForeignKey, Enum, text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -91,6 +91,22 @@ class User(Base):
         nullable=True,
         comment="Timestamp tracking user activity for session invalidation."
     )
+    name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="NextAuth user display name."
+    )
+    email_verified: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        name="emailVerified",
+        nullable=True,
+        comment="NextAuth timestamp when email was verified."
+    )
+    image: Mapped[Optional[str]] = mapped_column(
+        String(2048),
+        nullable=True,
+        comment="NextAuth profile image URL."
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -115,6 +131,21 @@ class User(Base):
     )
     analysis_jobs: Mapped[List["AnalysisJob"]] = relationship(
         "AnalysisJob",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    accounts: Mapped[List["Account"]] = relationship(
+        "Account",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    sessions: Mapped[List["Session"]] = relationship(
+        "Session",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    usage_metrics: Mapped[List["UsageMetric"]] = relationship(
+        "UsageMetric",
         back_populates="user",
         cascade="all, delete-orphan"
     )
@@ -505,3 +536,193 @@ class OutputDownload(Base):
     # Relationships
     output: Mapped["GeneratedOutput"] = relationship("GeneratedOutput", back_populates="downloads")
     user: Mapped["User"] = relationship("User")
+
+
+class Account(Base):
+    """
+    NextAuth adapter table linking users to federated OAuth accounts.
+    """
+    __tablename__ = "accounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key UUID for account connection."
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        name="userId",
+        index=True,
+        comment="Reference to the users table. Cascade deletes on user removal."
+    )
+    type: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="OAuth provider account type (e.g. oauth, email, credentials)."
+    )
+    provider: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+        comment="OAuth identity provider name (e.g. github, google)."
+    )
+    provider_account_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        name="providerAccountId",
+        index=True,
+        comment="Unique identifier issued by OAuth provider for the user."
+    )
+    refresh_token: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+        comment="OAuth token refresh credential string."
+    )
+    access_token: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+        comment="OAuth active session token string."
+    )
+    expires_at: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Active access token expiration epoch timestamp."
+    )
+    token_type: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Type of token returned (e.g. Bearer)."
+    )
+    scope: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="OAuth scope permissions list granted by provider."
+    )
+    id_token: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+        comment="OIDC ID token string."
+    )
+    session_state: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="OAuth session state string."
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider", "providerAccountId", name="uq_accounts_provider_provider_account_id"),
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="accounts")
+
+
+class Session(Base):
+    """
+    NextAuth adapter table managing user login sessions.
+    """
+    __tablename__ = "sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key UUID for login session."
+    )
+    session_token: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        nullable=False,
+        name="sessionToken",
+        index=True,
+        comment="Secure session authentication token string."
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        name="userId",
+        index=True,
+        comment="Reference to the users table. Cascade deletes on user removal."
+    )
+    expires: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Session expiration timestamp."
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="sessions")
+
+
+class VerificationToken(Base):
+    """
+    NextAuth adapter table for passwordless verification tokens.
+    """
+    __tablename__ = "verification_tokens"
+
+    identifier: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        comment="Verification subject identifier (e.g. email address)."
+    )
+    token: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        unique=True,
+        comment="Secure validation token string."
+    )
+    expires: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Verification token expiration timestamp."
+    )
+
+
+class UsageMetric(Base):
+    """
+    Tracks API and LLM usage metrics per user for audit, rate-limiting fallback, and billing.
+    """
+    __tablename__ = "usage_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key UUID for usage metric record."
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="User associated with this usage record."
+    )
+    endpoint: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="The API endpoint accessed (e.g., /analyze, /regenerate)."
+    )
+    calls_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="Number of times endpoint was called."
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        comment="Timestamp of the usage occurrence."
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="usage_metrics")

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import text
@@ -9,7 +9,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.redis_client import get_redis, redis_client
-from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus, GeneratedOutput, OutputDownload, OutputType, DownloadFormat
+from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus, GeneratedOutput, OutputDownload, OutputType, DownloadFormat, Session as SessionModel, UsageMetric, SubscriptionTier
 
 app = FastAPI(
     title="RepoProof API",
@@ -27,6 +27,148 @@ app.add_middleware(
 )
 
 router = APIRouter(prefix="/api/v1")
+
+
+async def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    redis_conn: redis.Redis = Depends(get_redis)
+) -> User:
+    # 1. Extract session token from cookie or Authorization header
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+    
+    if not token:
+        # Check cookies
+        token = request.cookies.get("next-auth.session-token") or request.cookies.get("__Secure-next-auth.session-token")
+        
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session token is missing."
+        )
+
+    # 2. Check Redis cache first
+    redis_key = f"session:{token}"
+    try:
+        cached_session = redis_conn.get(redis_key)
+    except Exception as e:
+        logger.error(f"Redis session read error: {e}")
+        cached_session = None
+
+    if cached_session:
+        try:
+            session_data = json.loads(cached_session)
+            user_id = session_data.get("user_id")
+            if user_id:
+                user = db.query(User).filter(User.id == user_id).first()
+                if user and user.is_active:
+                    return user
+        except Exception as e:
+            logger.error(f"Error parsing cached session: {e}")
+
+    # 3. Cache miss: Query database
+    db_session = db.query(SessionModel).filter(SessionModel.session_token == token).first()
+    if not db_session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session not found or expired."
+        )
+
+    # Check expiration
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    session_expires = db_session.expires
+    if session_expires.tzinfo is None:
+        session_expires = session_expires.replace(tzinfo=timezone.utc)
+        
+    if session_expires < now:
+        db.delete(db_session)
+        db.commit()
+        try:
+            redis_conn.srem(f"user_sessions:{db_session.user_id}", token)
+            redis_conn.delete(redis_key)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has expired."
+        )
+
+    # Get User
+    user = db.query(User).filter(User.id == db_session.user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive."
+        )
+
+    # Cache in Redis with 1-hour TTL (3600 seconds)
+    session_data = {
+        "id": str(db_session.id),
+        "session_token": db_session.session_token,
+        "user_id": str(db_session.user_id),
+        "expires": db_session.expires.isoformat()
+    }
+    try:
+        redis_conn.setex(redis_key, 3600, json.dumps(session_data))
+        redis_conn.sadd(f"user_sessions:{user.id}", token)
+        redis_conn.expire(f"user_sessions:{user.id}", 3600)
+    except Exception as e:
+        logger.error(f"Failed to cache session in Redis: {e}")
+
+    return user
+
+
+class RateLimiter:
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+
+    async def __call__(
+        self,
+        user: User = Depends(get_current_user),
+        redis_conn: redis.Redis = Depends(get_redis),
+        db: Session = Depends(get_db)
+    ):
+        tier = user.subscription_tier
+        limit = 100 if tier == SubscriptionTier.PRO or tier == "pro" else 5
+        
+        key = f"rate_limit:{self.endpoint}:{user.id}"
+        try:
+            current = redis_conn.get(key)
+            if current and int(current) >= limit:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Rate limit exceeded for endpoint {self.endpoint}. Limit: {limit}/hour."
+                )
+            
+            # Increment and set TTL if new
+            pipe = redis_conn.pipeline()
+            pipe.incr(key)
+            if not current:
+                pipe.expire(key, 3600)
+            pipe.execute()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Rate limiting error: {e}")
+            
+        # Log to usage metrics in PostgreSQL
+        try:
+            metric = UsageMetric(
+                user_id=user.id,
+                endpoint=self.endpoint,
+                calls_count=1
+            )
+            db.add(metric)
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to log usage metric: {e}")
+            db.rollback()
+
+        return user
 
 @router.get("/health", tags=["health"])
 async def health_check(
@@ -171,7 +313,8 @@ async def get_repositories(
 @router.post("/repositories/{id}/analyze", tags=["analysis"])
 async def trigger_repository_analysis(
     id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(RateLimiter("/analyze"))
 ):
     """
     Triggers the LangGraph analysis pipeline in the background for a repository.
@@ -737,7 +880,8 @@ async def download_output_file(
 async def regenerate_output(
     id: str,
     payload: OutputRegenerateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(RateLimiter("/regenerate"))
 ):
     """
     Takes ats_mode and custom_instructions, calls the LLM, overwrites the MinIO file,
@@ -886,6 +1030,111 @@ async def export_outputs_zip(
     return {
         "download_url": presigned_url,
         "expires_at": (datetime.utcnow() + timedelta(seconds=expires_in_seconds)).isoformat()
+    }
+
+
+class UserUpdatePayload(BaseModel):
+    name: Optional[str] = None
+    subscription_tier: Optional[SubscriptionTier] = None
+
+
+@router.get("/auth/me", tags=["auth"])
+async def get_auth_me(
+    user: User = Depends(get_current_user)
+):
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "name": user.name,
+        "image": user.image,
+        "github_username": user.github_username,
+        "subscription_tier": user.subscription_tier.value if hasattr(user.subscription_tier, 'value') else user.subscription_tier,
+        "is_active": user.is_active,
+        "created_at": user.created_at.isoformat() if user.created_at else None
+    }
+
+
+@router.post("/auth/signout", tags=["auth"])
+async def signout(
+    request: Request,
+    db: Session = Depends(get_db),
+    redis_conn: redis.Redis = Depends(get_redis)
+):
+    # Extract session token from cookie or Authorization header
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+    
+    if not token:
+        token = request.cookies.get("next-auth.session-token") or request.cookies.get("__Secure-next-auth.session-token")
+        
+    if not token:
+        return {"status": "success", "message": "No active session to sign out."}
+
+    # Delete from Redis cache
+    redis_key = f"session:{token}"
+    try:
+        cached_session = redis_conn.get(redis_key)
+        if cached_session:
+            session_data = json.loads(cached_session)
+            user_id = session_data.get("user_id")
+            if user_id:
+                redis_conn.srem(f"user_sessions:{user_id}", token)
+        redis_conn.delete(redis_key)
+    except Exception as e:
+        logger.error(f"Redis session delete error: {e}")
+
+    # Delete from PostgreSQL database
+    try:
+        db_session = db.query(SessionModel).filter(SessionModel.session_token == token).first()
+        if db_session:
+            db.delete(db_session)
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"DB session delete error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to sign out: {str(e)}"
+        )
+
+    return {"status": "success", "message": "Successfully signed out."}
+
+
+@router.patch("/users/me", tags=["users"])
+async def update_user_profile(
+    payload: UserUpdatePayload,
+    db: Session = Depends(get_db),
+    redis_conn: redis.Redis = Depends(get_redis),
+    user: User = Depends(get_current_user)
+):
+    if payload.name is not None:
+        user.name = payload.name
+    if payload.subscription_tier is not None:
+        user.subscription_tier = payload.subscription_tier
+        
+    db.commit()
+    
+    # Invalidate Redis session cache key
+    try:
+        user_sessions_key = f"user_sessions:{user.id}"
+        tokens = redis_conn.smembers(user_sessions_key)
+        if tokens:
+            for token in tokens:
+                redis_conn.delete(f"session:{token}")
+            redis_conn.delete(user_sessions_key)
+    except Exception as e:
+        logger.error(f"Failed to invalidate user sessions in Redis: {e}")
+        
+    return {
+        "status": "success",
+        "message": "Profile updated and session cache invalidated.",
+        "user": {
+            "id": str(user.id),
+            "name": user.name,
+            "subscription_tier": user.subscription_tier.value if hasattr(user.subscription_tier, 'value') else user.subscription_tier
+        }
     }
 
 
