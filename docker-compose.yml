@@ -136,11 +136,11 @@ services:
     image: langfuse/langfuse:2
     container_name: repoproof-langfuse
     ports:
-      - "3000:3000"
+      - "3030:3000"
     environment:
       - DATABASE_URL=postgresql://postgres:postgres_dev_pass@postgres:5432/langfuse
       - NEXTAUTH_SECRET=langfuse_dev_secret_key
-      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_URL=http://localhost:3030
       - SALT=langfuse_dev_salt_string
       - TELEMETRY_ENABLED=false
     depends_on:
