@@ -207,6 +207,12 @@ def run_analysis_workflow_task(repository_id: str, job_id: str):
         if error:
             raise RuntimeError(error)
             
+        # Check if the graph is interrupted (waiting for human review)
+        state_info = analysis_graph.get_state(config)
+        if state_info.next:
+            logger.info(f"LangGraph execution interrupted for thread {job_id}. Next node: {state_info.next}")
+            return {"status": "interrupted", "job_id": job_id, "next": state_info.next}
+            
         logger.info(f"LangGraph execution finished successfully for thread {job_id}.")
         
         # 6. Update Job Status to COMPLETE
@@ -220,6 +226,87 @@ def run_analysis_workflow_task(repository_id: str, job_id: str):
         
     except Exception as e:
         logger.exception(f"Unexpected error in run_analysis_workflow_task for job {job_id}: {e}")
+        db.rollback()
+        
+        # Mark job as failed in PostgreSQL
+        try:
+            from app.models import AnalysisJob, JobStatus
+            db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                "status": JobStatus.FAILED,
+                "error_message": str(e),
+                "completed_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            })
+            db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to log job failure to database: {db_err}")
+            
+        return {"status": "error", "job_id": job_id, "message": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.resume_analysis_workflow_task")
+def resume_analysis_workflow_task(job_id: str, updated_facts: Optional[list] = None):
+    """
+    Background task to resume the paused LangGraph workflow for a repository.
+    Optionally updates the candidate facts in the checkpoint state before resuming.
+    """
+    logger.info(f"Resuming analysis workflow task. Job: {job_id}")
+    db = SessionLocal()
+    try:
+        from app.models import AnalysisJob, JobStatus, Repository, AnalysisStatus
+        from app.analysis_graph import analysis_graph
+        
+        # 1. Update Job Status to RUNNING
+        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+            "status": JobStatus.RUNNING,
+            "updated_at": datetime.utcnow()
+        })
+        db.commit()
+        
+        # 2. Fetch Job Details
+        job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+        if not job:
+            raise ValueError(f"Analysis job {job_id} not found in database.")
+            
+        # Update repo status to ANALYZING to indicate active progress
+        db.query(Repository).filter(Repository.id == job.repository_id).update({
+            "analysis_status": AnalysisStatus.ANALYZING,
+            "updated_at": datetime.utcnow()
+        })
+        db.commit()
+
+        # 3. Setup LangGraph thread configuration
+        config = {"configurable": {"thread_id": job_id}}
+        
+        # 4. If updated facts are provided, update the graph state
+        if updated_facts is not None:
+            logger.info(f"Updating graph state with revised facts for thread {job_id}...")
+            analysis_graph.update_state(config, {"extracted_facts": updated_facts}, as_node="await_human_review")
+            
+        # 5. Invoke graph with None input to resume from checkpoint
+        logger.info(f"Resuming LangGraph orchestrator thread {job_id}...")
+        final_state = analysis_graph.invoke(None, config)
+        
+        # 6. Handle execution results
+        error = final_state.get("error")
+        if error:
+            raise RuntimeError(error)
+            
+        logger.info(f"LangGraph execution resumed and finished successfully for thread {job_id}.")
+        
+        # 7. Update Job Status to COMPLETE
+        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+            "status": JobStatus.COMPLETE,
+            "completed_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        })
+        db.commit()
+        return {"status": "success", "job_id": job_id}
+        
+    except Exception as e:
+        logger.exception(f"Unexpected error in resume_analysis_workflow_task for job {job_id}: {e}")
         db.rollback()
         
         # Mark job as failed in PostgreSQL

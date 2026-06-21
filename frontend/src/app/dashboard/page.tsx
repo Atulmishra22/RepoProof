@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 
 interface Repository {
   id: string;
@@ -14,6 +15,7 @@ interface Repository {
   star_count: number;
   analysis_status: string;
   last_analyzed_at: string | null;
+  latest_job_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -29,6 +31,7 @@ interface Profile {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [usernameInput, setUsernameInput] = useState("");
   const [currentUsername, setCurrentUsername] = useState("Atulmishra22");
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -38,6 +41,7 @@ export default function DashboardPage() {
   const [statusMessage, setStatusMessage] = useState("");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [activeJobs, setActiveJobs] = useState<Record<string, { jobId: string; currentNode: string | null }>>({});
+  const [reviewAlert, setReviewAlert] = useState<{ repositoryId: string; repoName: string; jobId: string } | null>(null);
 
   // Analysis result states
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
@@ -166,6 +170,55 @@ export default function DashboardPage() {
     fetchActiveJobs();
   }, [repositories, activeJobs]);
 
+  // Establish WebSocket connection to listen for real-time human-in-the-loop review alerts
+  useEffect(() => {
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api/v1/ws/reviews";
+    let ws: WebSocket;
+    let reconnectTimeout: NodeJS.Timeout;
+
+    function connect() {
+      ws = new WebSocket(wsUrl);
+      
+      ws.onopen = () => {
+        console.log("Connected to RepoProof WebSocket status broadcast server.");
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "status_update") {
+            // Re-fetch user data to refresh repository status indicators
+            fetchUserData(currentUsername);
+            
+            if (data.status === "awaiting_review") {
+              const matchedRepo = repositories.find(r => r.id === data.repository_id);
+              const repoLabel = matchedRepo ? matchedRepo.name : "your repository";
+              setReviewAlert({
+                repositoryId: data.repository_id,
+                repoName: repoLabel,
+                jobId: data.job_id
+              });
+            }
+          }
+        } catch (err) {
+          console.error("Error handling WebSocket message:", err);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("WebSocket disconnected. Retrying in 5 seconds...");
+        reconnectTimeout = setTimeout(connect, 5000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      if (ws) ws.close();
+      clearTimeout(reconnectTimeout);
+    };
+  }, [repositories, currentUsername]);
+
   // Poll active jobs status from the backend
   useEffect(() => {
     const activeRepoIds = Object.keys(activeJobs);
@@ -183,10 +236,10 @@ export default function DashboardPage() {
             const res = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/analysis/${jobId}`);
             if (res.ok) {
               const data = await res.json();
-              const status = data.status; // e.g. queued, running, complete, failed
+              const status = data.status; // e.g. queued, running, complete, failed, interrupted
               const currentNode = data.current_node;
 
-              if (status === "complete" || status === "failed" || status === "timed_out") {
+              if (status === "interrupted" || status === "complete" || status === "failed" || status === "timed_out") {
                 delete updatedJobs[repoId];
                 changed = true;
                 finishedAny = true;
@@ -332,6 +385,40 @@ export default function DashboardPage() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+
+        {/* Real-time Review Alert Banner */}
+        {reviewAlert && (
+          <div className="mb-8 rounded-xl border border-amber-900/50 bg-gradient-to-r from-amber-950/20 to-orange-950/15 p-5 text-sm text-amber-200 shadow-lg shadow-amber-950/15 animate-pulse">
+            <div className="flex items-center justify-between gap-4 flex-wrap sm:flex-nowrap">
+              <div className="flex items-start gap-3">
+                <svg className="h-5 w-5 text-amber-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                </svg>
+                <div>
+                  <h4 className="font-bold text-amber-400">Analysis Awaiting Review</h4>
+                  <p className="mt-1 text-zinc-400">Extracted claims are ready for review and refinement for repository: <span className="text-zinc-200 font-mono font-semibold">{reviewAlert.repoName}</span></p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  onClick={() => setReviewAlert(null)}
+                  className="px-3 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  Dismiss
+                </button>
+                <button 
+                  onClick={() => {
+                    setReviewAlert(null);
+                    router.push(`/dashboard/review/${reviewAlert.jobId}`);
+                  }}
+                  className="rounded-lg bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 border border-transparent px-4 py-1.5 text-xs font-semibold text-white transition-all shadow-[0_0_8px_rgba(245,158,11,0.2)] cursor-pointer"
+                >
+                  Review & Refine Now
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         
         {/* Connection/Backend Error Warning */}
         {connectionError && (
@@ -547,6 +634,8 @@ export default function DashboardPage() {
                         <span className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
                           repo.analysis_status === "complete" 
                             ? "bg-green-950/20 text-green-400 border-green-900/40"
+                            : repo.analysis_status === "awaiting_review"
+                            ? "bg-amber-950/20 text-amber-400 border-amber-900/40"
                             : repo.analysis_status === "failed"
                             ? "bg-red-950/20 text-red-400 border-red-900/40"
                             : repo.analysis_status === "analyzing"
@@ -555,6 +644,8 @@ export default function DashboardPage() {
                         }`}>
                           {repo.analysis_status === "analyzing" && activeJobs[repo.id]?.currentNode
                             ? `analyzing (${activeJobs[repo.id].currentNode})`
+                            : repo.analysis_status === "awaiting_review"
+                            ? "awaiting review"
                             : repo.analysis_status}
                         </span>
                       </div>
@@ -587,6 +678,13 @@ export default function DashboardPage() {
                             className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-3.5 py-1.5 rounded transition-colors shadow-[0_0_8px_rgba(16,185,129,0.3)]"
                           >
                             View Results
+                          </button>
+                        ) : repo.analysis_status === "awaiting_review" ? (
+                          <button
+                            onClick={() => router.push(`/dashboard/review/${repo.latest_job_id}`)}
+                            className="bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-bold text-[10px] px-3.5 py-1.5 rounded transition-all duration-150 shadow-[0_0_8px_rgba(245,158,11,0.3)]"
+                          >
+                            Review & Refine
                           </button>
                         ) : (
                           <button

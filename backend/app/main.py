@@ -151,6 +151,14 @@ async def get_repositories(
                 "star_count": r.star_count,
                 "analysis_status": r.analysis_status.value if hasattr(r.analysis_status, 'value') else r.analysis_status,
                 "last_analyzed_at": r.last_analyzed_at.isoformat() if r.last_analyzed_at else None,
+                "latest_job_id": (
+                    lambda val: str(val) if val else None
+                )(
+                    db.execute(
+                        text("SELECT id FROM analysis_jobs WHERE repository_id = :repo_id ORDER BY created_at DESC LIMIT 1"),
+                        {"repo_id": r.id}
+                    ).scalar()
+                ),
                 "created_at": r.created_at.isoformat(),
                 "updated_at": r.updated_at.isoformat()
             }
@@ -288,6 +296,7 @@ async def get_repository_analysis_result(
     db: Session = Depends(get_db)
 ):
     """
+    `GET /api/v1/repositories/{id}/analysis-result`
     Fetches the compiled analysis result (extracted facts, suggested questions, and cost metrics)
     from MinIO storage for a given repository.
     """
@@ -319,6 +328,246 @@ async def get_repository_analysis_result(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch analysis result: {str(e)}"
+        )
+
+
+# ==========================================
+# Phase 5: Human-In-The-Loop Reviews & WebSockets
+# ==========================================
+import logging
+import base64
+import os
+import httpx
+from typing import List, Dict, Any
+from fastapi import WebSocket, WebSocketDisconnect
+import redis.asyncio as async_redis
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+        
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"WebSocket client connected. Total clients: {len(self.active_connections)}")
+        
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info(f"WebSocket client disconnected. Total clients: {len(self.active_connections)}")
+        
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                logger.error(f"Failed to send WebSocket message: {e}")
+
+manager = ConnectionManager()
+
+# Background Redis PubSub listener for WebSocket status updates
+async def redis_pubsub_listener():
+    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+    logger.info(f"Starting Redis Pub/Sub listener on {redis_url}...")
+    while True:
+        try:
+            r = async_redis.from_url(redis_url)
+            pubsub = r.pubsub()
+            await pubsub.subscribe("review_status_channel")
+            logger.info("Subscribed to Redis channel review_status_channel successfully.")
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True)
+                if message:
+                    try:
+                        data = json.loads(message["data"])
+                        logger.info(f"Broadcasting Redis message to WebSockets: {data}")
+                        await manager.broadcast(data)
+                    except Exception as e:
+                        logger.error(f"Error parsing/broadcasting message: {e}")
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Redis PubSub listener error: {e}. Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(redis_pubsub_listener())
+
+@app.websocket("/api/v1/ws/reviews")
+async def websocket_reviews_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Maintain connection alive
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+class FactsUpdatePayload(BaseModel):
+    facts: List[Dict[str, Any]]
+
+@router.patch("/reviews/{job_id}/facts", tags=["analysis"])
+async def update_facts_and_resume(
+    job_id: str,
+    payload: FactsUpdatePayload,
+    db: Session = Depends(get_db)
+):
+    """
+    Updates the LangGraph checkpointer state with the reviewed facts and resumes the workflow.
+    """
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis job not found."
+        )
+        
+    from app.tasks import resume_analysis_workflow_task
+    try:
+        # Trigger Celery task to update state and resume
+        resume_analysis_workflow_task.delay(str(job.id), payload.facts)
+        return {
+            "status": "success",
+            "message": "Analysis resume triggered successfully with updated facts."
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to trigger resume: {str(e)}"
+        )
+
+
+class ChatRequestPayload(BaseModel):
+    message: str
+    facts: List[Dict[str, Any]]
+
+async def fetch_github_file(owner: str, repo: str, path: str, token: Optional[str] = None) -> str:
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=headers, timeout=10.0)
+            if response.status_code == 200:
+                data = response.json()
+                content_b64 = data.get("content", "")
+                if content_b64:
+                    return base64.b64decode(content_b64).decode("utf-8", errors="ignore")
+            return ""
+        except Exception as e:
+            logger.error(f"Error fetching github file {path}: {e}")
+            return ""
+
+@router.post("/reviews/{job_id}/chat", tags=["analysis"])
+async def review_chat_interaction(
+    job_id: str,
+    payload: ChatRequestPayload,
+    db: Session = Depends(get_db)
+):
+    """
+    Chat assistant inside the Human-in-the-Loop review editor.
+    Uses context from key repository files and current facts to suggest edits.
+    """
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis job not found."
+        )
+        
+    repo = db.query(Repository).filter(Repository.id == job.repository_id).first()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found."
+        )
+        
+    # Get GITHUB_TOKEN
+    github_token = os.environ.get("GITHUB_TOKEN")
+    
+    # Identify key files from the file tree if we have them in MinIO
+    from app.analysis_graph import get_s3_client, LITELLM_PROXY_URL, MODEL_NAME
+    s3 = get_s3_client()
+    bucket_name = "repoproof-data"
+    
+    file_tree = {}
+    try:
+        s3_resp = s3.get_object(Bucket=bucket_name, Key=f"repos/{repo.id}/file_tree.json")
+        file_tree = json.loads(s3_resp["Body"].read().decode("utf-8"))
+    except Exception:
+        pass
+        
+    # Read up to 3 files
+    key_files_context = ""
+    candidate_paths = ["package.json", "pyproject.toml", "requirements.txt", "main.py", "app.py"]
+    # Add files from tree if available and matching candidates
+    matched_paths = []
+    for path in file_tree.keys():
+        filename = os.path.basename(path).lower()
+        if filename in candidate_paths:
+            matched_paths.append(path)
+            if len(matched_paths) >= 3:
+                break
+                
+    if not matched_paths:
+        matched_paths = candidate_paths[:2]
+        
+    for path in matched_paths:
+        file_content = await fetch_github_file(repo.owner, repo.name, path, github_token)
+        if file_content:
+            key_files_context += f"--- FILE: {path} ---\n{file_content[:2000]}\n\n"
+            
+    system_prompt = (
+        "You are an expert Senior Technical Recruiter and AI pairing partner helping the user refine their repository analysis facts.\n"
+        "Analyze the user's message alongside the current list of candidate facts and the repository's key files context.\n\n"
+        "Provide professional, helpful advice. If the user asks to modify a claim, write a revised version of that claim in active voice starting with a strong verb.\n"
+        "If the user asks to create a new claim, design it strictly based on the codebase details and return it in this exact format:\n"
+        "Category: [technology_used | architecture_pattern | complexity_metric | contribution | performance_optimization | security_hardening | cost_saving]\n"
+        "Claim: [Strong action-oriented resume bullet point]\n"
+        "Source File: [relative filepath]\n"
+        "Snippet: [code snippet]\n"
+        "ATS Impact: [why it demonstrates senior capacity]\n"
+    )
+    
+    user_prompt = (
+        f"Key codebase files context:\n{key_files_context}\n\n"
+        f"Current candidate facts:\n{json.dumps(payload.facts, indent=2)}\n\n"
+        f"User message: {payload.message}"
+    )
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{LITELLM_PROXY_URL}/v1/chat/completions",
+                json={
+                    "model": MODEL_NAME,
+                    "messages": messages,
+                    "temperature": 0.3
+                },
+                timeout=40.0
+            )
+            response.raise_for_status()
+            resp_data = response.json()
+            reply = resp_data["choices"][0]["message"]["content"]
+            return {"reply": reply}
+    except Exception as e:
+        logger.exception(f"Error in review chat LLM call: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate AI response: {str(e)}"
         )
 
 

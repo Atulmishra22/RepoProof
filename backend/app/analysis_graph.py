@@ -506,6 +506,21 @@ def upload_metadata_node(state: AnalysisState, config: Optional[RunnableConfig] 
         db.commit()
         logger.info("PostgreSQL records and MinIO storage updated successfully.")
         
+        # Publish COMPLETE status broadcast
+        try:
+            from app.redis_client import redis_client
+            job_id = config.get("configurable", {}).get("thread_id") if config else None
+            broadcast_msg = {
+                "type": "status_update",
+                "repository_id": str(repo_id),
+                "status": "complete",
+                "job_id": str(job_id) if job_id else None
+            }
+            redis_client.publish("review_status_channel", json.dumps(broadcast_msg))
+            logger.info("Published COMPLETE status update broadcast to Redis.")
+        except Exception as pub_err:
+            logger.error(f"Failed to publish status update broadcast: {pub_err}")
+        
     except Exception as e:
         logger.exception(f"Error in upload_metadata_node: {e}")
         db.rollback()
@@ -519,6 +534,103 @@ def upload_metadata_node(state: AnalysisState, config: Optional[RunnableConfig] 
             
     return {"status": "complete"}
 
+def save_intermediate_results_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    repo_id = state["repository_id"]
+    file_tree = state.get("file_tree", {})
+    error = state.get("error")
+    
+    if error:
+        return {}
+
+    logger.info("Saving intermediate analysis results for human review...")
+    
+    db = SessionLocal()
+    try:
+        s3 = get_s3_client()
+        bucket_name = "repoproof-data"
+        
+        # Ensure MinIO bucket exists
+        try:
+            s3.create_bucket(Bucket=bucket_name)
+        except s3.exceptions.BucketAlreadyExists:
+            pass
+        except s3.exceptions.BucketAlreadyOwnedByYou:
+            pass
+            
+        # 1. Upload intermediate file tree mapping JSON to MinIO
+        s3_key = f"repos/{repo_id}/file_tree.json"
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=s3_key,
+            Body=json.dumps(file_tree, indent=2),
+            ContentType="application/json"
+        )
+
+        # 2. Upload intermediate analysis result (facts and questions) to MinIO
+        analysis_result = {
+            "facts": state.get("extracted_facts", []),
+            "suggested_questions": state.get("suggested_questions", []),
+            "llm_tokens_used": state.get("llm_tokens_used", 0),
+            "llm_cost_usd": float(state.get("llm_cost_usd", 0.0))
+        }
+        s3_key_result = f"repos/{repo_id}/analysis_result.json"
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=s3_key_result,
+            Body=json.dumps(analysis_result, indent=2),
+            ContentType="application/json"
+        )
+        
+        # 3. Update repository status to AWAITING_REVIEW
+        db.query(Repository).filter(Repository.id == repo_id).update({
+            "analysis_status": AnalysisStatus.AWAITING_REVIEW,
+            "updated_at": datetime.utcnow()
+        })
+
+        # 4. Save metrics & update job status to INTERRUPTED in AnalysisJob
+        if config:
+            job_id = config.get("configurable", {}).get("thread_id")
+            if job_id:
+                db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                    "status": JobStatus.INTERRUPTED,
+                    "current_node": "await_human_review",
+                    "llm_tokens_used": state.get("llm_tokens_used", 0),
+                    "llm_cost_usd": state.get("llm_cost_usd", 0.0),
+                    "updated_at": datetime.utcnow()
+                })
+
+        db.commit()
+        logger.info("Intermediate records saved, repository marked as AWAITING_REVIEW.")
+        
+        # Publish AWAITING_REVIEW status broadcast
+        try:
+            from app.redis_client import redis_client
+            job_id = config.get("configurable", {}).get("thread_id") if config else None
+            broadcast_msg = {
+                "type": "status_update",
+                "repository_id": str(repo_id),
+                "status": "awaiting_review",
+                "job_id": str(job_id) if job_id else None
+            }
+            redis_client.publish("review_status_channel", json.dumps(broadcast_msg))
+            logger.info("Published AWAITING_REVIEW status update broadcast to Redis.")
+        except Exception as pub_err:
+            logger.error(f"Failed to publish status update broadcast: {pub_err}")
+        
+    except Exception as e:
+        logger.exception(f"Error in save_intermediate_results_node: {e}")
+        db.rollback()
+        return {"status": "failed", "error": f"Save intermediate error: {str(e)}"}
+    finally:
+        db.close()
+        
+    return {"status": "awaiting_review"}
+
+def await_human_review_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    # Pass-through node. When resumed, it just transitions forward to upload_metadata.
+    logger.info("Resuming execution from human review checkpoint...")
+    return {"status": "review_completed"}
+
 # Build LangGraph Workflow
 workflow = StateGraph(AnalysisState)
 
@@ -526,6 +638,8 @@ workflow.add_node("clone_repo", clone_repo_node)
 workflow.add_node("extract_facts", extract_heuristic_facts_node)
 workflow.add_node("extract_llm_facts", extract_llm_facts_node)
 workflow.add_node("validate_facts", validate_facts_node)
+workflow.add_node("save_intermediate", save_intermediate_results_node)
+workflow.add_node("await_human_review", await_human_review_node)
 workflow.add_node("upload_metadata", upload_metadata_node)
 
 # Define edges
@@ -533,14 +647,21 @@ workflow.add_edge(START, "clone_repo")
 workflow.add_edge("clone_repo", "extract_facts")
 workflow.add_edge("extract_facts", "extract_llm_facts")
 workflow.add_edge("extract_llm_facts", "validate_facts")
-workflow.add_edge("validate_facts", "upload_metadata")
+workflow.add_edge("validate_facts", "save_intermediate")
+workflow.add_edge("save_intermediate", "await_human_review")
+workflow.add_edge("await_human_review", "upload_metadata")
 workflow.add_edge("upload_metadata", END)
 
 # Compile graph with persistence
 try:
     checkpointer = get_checkpointer()
-    analysis_graph = workflow.compile(checkpointer=checkpointer)
+    analysis_graph = workflow.compile(
+        checkpointer=checkpointer,
+        interrupt_before=["await_human_review"]
+    )
 except Exception as e:
     logger.exception(f"Failed to compile LangGraph: {e}")
-    analysis_graph = workflow.compile()  # Fallback to no checkpointer for compiling safety
+    analysis_graph = workflow.compile(
+        interrupt_before=["await_human_review"]
+    )  # Fallback to no checkpointer for compiling safety
 
