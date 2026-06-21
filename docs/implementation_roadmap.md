@@ -103,15 +103,19 @@ This document outlines the phased build strategy and a compressed 3-week develop
 
 ### PHASE 6: Output Generation
 *   **GOAL**: Generate and export final documents using approved facts.
-*   **DEMO**: View generated resumes, LinkedIn summaries, and readmes in the browser, and download them.
+*   **DEMO**: View generated resumes, LinkedIn summaries, readmes, and portfolio pages in the browser, and download them.
 *   **DURATION**: 3 Days.
 *   **WHAT TO BUILD**:
-    1.  Write LLM prompt nodes for the remaining outputs (resume, LinkedIn, readme, portfolio) using approved facts.
-    2.  Implement S3 file export logic to upload markdown files to Cloudflare R2/MinIO.
-    3.  Build the R2 presigned URL generator in the API layer.
-    4.  Design the Next.js Outputs dashboard displaying tabs for each generated format.
-*   **FIRST TEST THAT MUST PASS**: Clicking the download button retrieves a working, temporary presigned download link.
-*   **HOW TO KNOW YOU'RE DONE**: You can view, copy, and download all four generated document types from the UI.
+    1.  Define database models (`GeneratedOutput`, `OutputDownload`) and run migrations.
+    2.  Install LaTeX compilation dependencies in backend and worker containers.
+    3.  Write LLM prompt nodes for synthesis outputs (LinkedIn, GitHub README, developer portfolio).
+    4.  Write the ATS reasoning optimizer stage and Jake's LaTeX resume template node with dynamic page layout budgeting.
+    5.  Implement the 3-step AI Self-Healing compiler loop using compilation log diagnostics, persisting errors in `AnalysisJob.error_message`.
+    6.  Implement Cloudflare R2 / MinIO upload logic for `.pdf`, `.md`, and `.txt` files.
+    7.  Build presigned URL generator in FastAPI backend.
+    8.  Design Next.js premium Outputs dashboard at `/dashboard/outputs/[repoId]` with tabs, copy action, version selectors, and downloads.
+*   **FIRST TEST THAT MUST PASS**: Clicking the download button retrieves a working, temporary presigned download link, and the LaTeX compiler successfully compiles a single-page PDF (recovering automatically if LLM produces invalid LaTeX syntax).
+*   **HOW TO KNOW YOU'RE DONE**: You can view, copy, and download all four generated document types (including PDF) from the UI.
 *   **DB CHANGES**: Create `generated_outputs` and `output_downloads` tables.
 *   **NEW API ENDPOINTS**:
     *   `GET /api/v1/repositories/{id}/outputs`

@@ -88,12 +88,13 @@ The following services compile our multi-container microservice system under `do
     `timeout: 5s`  
     `retries: 3`
 *   **RESTART**: `always`
+*   **NOTE**: The container image installs standard LaTeX/TeX Live compilation tools to compile `.tex` resumes to PDF in the background.
 
 ---
 
 ### 5. `worker`
 *   **SERVICE**: `worker`
-*   **IMAGE**: `repo-intel-backend:latest` (shares base code with backend)
+*   **IMAGE**: `repo-intel-backend:latest` (shares base code with backend and LaTeX compiler tools)
 *   **PORTS**: None (internal task execution only).
 *   **VOLUMES**: `./backend:/app`
 *   **ENVIRONMENT**: Same env payload as `backend` service.

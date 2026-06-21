@@ -59,12 +59,18 @@ This checklist tracks the implementation progress of the platform. Items will be
 ---
 
 ## [ ] Phase 6: Output Generation
-- [ ] Design LLM templates to synthesize approved facts into final copies (resumes, LinkedIn summaries, readmes, portfolios).
-- [ ] Write final document compiler nodes in LangGraph.
-- [ ] Configure file uploading tasks to Cloudflare R2 / MinIO.
+- [ ] Define `GeneratedOutput` and `OutputDownload` database models and execute Alembic migrations.
+- [ ] Install LaTeX compilation packages (`texlive-latex-base`, `texlive-fonts-recommended`, `texlive-latex-extra`) in backend/worker Docker containers.
+- [ ] Design LLM templates to synthesize approved facts into final copies (LinkedIn summary, GitHub README, Portfolio page).
+- [ ] Implement the ATS Optimizer Reasoning stage before resume generation to select high-impact verbs/keywords.
+- [ ] Implement Jake's LaTeX resume template with dynamic single-page budget layout controls.
+- [ ] Build the 3-step AI Self-Healing compiler retry loop using LaTeX logs to fix formatting/compilation failures.
+- [ ] Save LaTeX compilation error logs and diagnostics to `AnalysisJob.error_message`.
+- [ ] Write final document compiler nodes in LangGraph and connect to the workflow.
+- [ ] Configure file uploading tasks to Cloudflare R2 / MinIO for `.pdf`, `.md`, and `.txt` files.
 - [ ] Build presigned URL generator in FastAPI backend.
-- [ ] Create frontend tabs page to display, copy, and download documents.
-- [ ] **First Milestone Test**: Presigned URL download returns the correct markdown/text file format.
+- [ ] Create frontend premium outputs page (`/dashboard/outputs/[repoId]`) with copy-to-clipboard, version selector, and download triggers.
+- [ ] **First Milestone Test**: Presigned URL download returns the correct PDF/markdown/text formats, and AI self-healing successfully diagnoses and repairs invalid LaTeX syntax.
 
 ---
 

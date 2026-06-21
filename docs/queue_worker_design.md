@@ -6,118 +6,55 @@ This document describes the distributed task queue and worker architecture for t
 
 ## 5.1 Celery Task Definitions
 
-### 1. Ingest Repository
-*   **TASK**: `app.tasks.ingestion.ingest_repository`
-*   **QUEUE**: `analysis`
+### 1. Ingest User Profile Task
+*   **TASK**: `app.tasks.ingest_user_profile_task`
+*   **QUEUE**: `default`
 *   **PRIORITY**: medium
-*   **INPUT**: `{ "repository_id": "UUID", "user_id": "UUID" }`
-*   **OUTPUT**: `{ "success": "boolean" }` stored in the PostgreSQL `repositories` table (updates metadata fields and toggles status to `pending`).
-*   **TIMEOUT**: 60 seconds (hard kill)
-*   **SOFT TIMEOUT**: 45 seconds (graceful stop signal)
+*   **INPUT**: `{ "username": "string — GitHub username" }`
+*   **OUTPUT**: Syncs user profile metadata, caches profile README inside Redis, and upserts user repository records into the PostgreSQL `repositories` table.
+*   **TIMEOUT**: 120 seconds (hard kill)
+*   **SOFT TIMEOUT**: 100 seconds (graceful stop signal)
 *   **MAX RETRIES**: 3
-*   **RETRY BACKOFF**: exponential (10s, 30s, 60s), max delay 120 seconds.
-*   **ON FAILURE**: Sets the repository `analysis_status` to `failed` and logs the exception in `system_events`.
-*   **TRIGGERS**: Called when a user submits a new repository URL via the frontend.
-*   **TRIGGERS NEXT**: Auto-triggers `run_analysis_workflow` on success.
+*   **RETRY BACKOFF**: exponential (10s, 30s, 60s).
+*   **ON FAILURE**: Logs failure details and keeps repository analysis status as `pending`.
+*   **TRIGGERS**: Called when a user submits a GitHub username in the ingestion form.
 
 ---
 
-### 2. Run Analysis Workflow
-*   **TASK**: `app.tasks.pipeline.run_analysis_workflow`
-*   **QUEUE**: `analysis`
+### 2. Run Analysis Workflow Task
+*   **TASK**: `app.tasks.run_analysis_workflow_task`
+*   **QUEUE**: `default`
 *   **PRIORITY**: high
-*   **INPUT**: `{ "job_id": "UUID", "repository_id": "UUID" }`
-*   **OUTPUT**: State checkpoints stored in PostgreSQL via the LangGraph checkpointer.
+*   **INPUT**: `{ "repository_id": "UUID", "job_id": "UUID" }`
+*   **OUTPUT**: Starts the LangGraph orchestrator, clones repository source tree, runs code fact extraction, and saves checkpoints to Postgres.
 *   **TIMEOUT**: 300 seconds (hard kill)
 *   **SOFT TIMEOUT**: 240 seconds (graceful stop signal)
-*   **MAX RETRIES**: 0 (no task-level retries; the graph handles retries internally per node).
-*   **RETRY BACKOFF**: None.
-*   **ON FAILURE**: Updates `analysis_jobs` status to `failed`, sets the repository status to `failed`, and logs the error details.
-*   **TRIGGERS**: Triggered on successful repository metadata ingestion or manually by the user.
-*   **TRIGGERS NEXT**: Triggers `notify_review_required` when the graph reaches the `await_human_review` interrupt checkpoint.
+*   **ON FAILURE**: Updates `analysis_jobs` status to `failed` and logs error message.
+*   **TRIGGERS**: Triggered when a user requests analysis on an ingested repository.
+*   **TRIGGERS NEXT**: Pauses and saves state checkpoint at `await_human_review` interrupt node, notifying user via WebSockets.
 
 ---
 
-### 3. Resume Analysis Workflow
-*   **TASK**: `app.tasks.pipeline.resume_analysis_workflow`
-*   **QUEUE**: `generation`
+### 3. Resume Analysis Workflow Task
+*   **TASK**: `app.tasks.resume_analysis_workflow_task`
+*   **QUEUE**: `default`
 *   **PRIORITY**: high
-*   **INPUT**:  
-    `{ "job_id": "UUID", "review_id": "UUID", "approved_facts": "list[dict]", "rejected_fact_ids": "list[UUID]" }`
-*   **OUTPUT**: Finalized documents written to the database `generated_outputs` and files saved to Cloudflare R2.
-*   **TIMEOUT**: 180 seconds (hard kill)
-*   **SOFT TIMEOUT**: 150 seconds (graceful stop signal)
-*   **MAX RETRIES**: 0 (workflow resume handles internal transient LLM API retries).
-*   **RETRY BACKOFF**: None.
-*   **ON FAILURE**: Sets `analysis_jobs` and repository statuses to `failed`, releasing resources and logging the failure.
-*   **TRIGGERS**: Triggered when a user approves/edits facts via the review portal API.
-*   **TRIGGERS NEXT**: Triggers `generate_embeddings` on success.
+*   **INPUT**: `{ "job_id": "UUID", "updated_facts": "list[dict] — optional user edited/approved facts" }`
+*   **OUTPUT**: Updates LangGraph checkpoint with candidate facts and resumes execution. Executes output document compilation (resume, README, LinkedIn summary, developer portfolio), uploads final files to object storage, and updates job status to `complete`.
+*   **COMPILATION DETAILS & SELF-HEALING**:
+    *   **ATS Optimizer**: Runs an intermediate reasoning step to select high-impact verbs/keywords matching ATS guidelines.
+    *   **LaTeX Compilation**: Renders a standard Jake's style LaTeX template and compiles to PDF via `pdflatex` subprocess.
+    *   **AI Self-Healing Compiler Loop**: If compilation fails, grabs the last 30 lines of the compile log and feeds the LaTeX code back to the LLM to diagnose and repair it (re-compiles up to 3 times).
+    *   **Diagnostic Logs**: Persists LaTeX errors in the `AnalysisJob.error_message` column.
+*   **TIMEOUT**: 240 seconds (hard kill)
+*   **ON FAILURE**: Updates `analysis_jobs` and repository statuses to `failed` and records failure trace in `error_message`.
+*   **TRIGGERS**: Called when a user confirms/approves their facts checklist on the Review Page.
 
 ---
 
-### 4. Generate Embeddings
-*   **TASK**: `app.tasks.embeddings.generate_embeddings`
-*   **QUEUE**: `analysis`
-*   **PRIORITY**: low
-*   **INPUT**: `{ "job_id": "UUID", "approved_fact_ids": "list[UUID]" }`
-*   **OUTPUT**: 768-dimensional float arrays saved to the `fact_embeddings` table.
-*   **TIMEOUT**: 120 seconds (hard kill)
-*   **SOFT TIMEOUT**: 90 seconds (graceful stop signal)
-*   **MAX RETRIES**: 3
-*   **RETRY BACKOFF**: exponential (5s, 15s, 30s), max delay 60 seconds.
-*   **ON FAILURE**: Logs failure to `system_events`. Embeddings can be re-run manually; a failure does not block the user from accessing their generated resume.
-*   **TRIGGERS**: Triggered on successful completion of the resume generation step.
-*   **TRIGGERS NEXT**: None.
-
----
-
-### 5. Notify Review Required
-*   **TASK**: `app.tasks.notifications.notify_review_required`
-*   **QUEUE**: `notifications`
-*   **PRIORITY**: medium
-*   **INPUT**: `{ "job_id": "UUID", "user_id": "UUID", "review_id": "UUID" }`
-*   **OUTPUT**: Publishes WebSocket message to Redis channel `user:events:{user_id}` and triggers an email notification.
-*   **TIMEOUT**: 30 seconds (hard kill)
-*   **SOFT TIMEOUT**: 20 seconds (graceful stop signal)
-*   **MAX RETRIES**: 5
-*   **RETRY BACKOFF**: exponential (10s, 60s, 300s).
-*   **ON FAILURE**: Logs failure to `system_events` (does not break the core workflow; the user can still find the review task on their dashboard).
-*   **TRIGGERS**: Triggered when the analysis workflow hits the interrupt checkpoint.
-*   **TRIGGERS NEXT**: None.
-
----
-
-### 6. Expire Stale Reviews
-*   **TASK**: `app.tasks.cron.expire_stale_reviews`
-*   **QUEUE**: `default`
-*   **PRIORITY**: low
-*   **INPUT**: `{}`
-*   **OUTPUT**: Updates expired reviews to `timed_out` status and sets their jobs to `failed`.
-*   **TIMEOUT**: 60 seconds (hard kill)
-*   **SOFT TIMEOUT**: 45 seconds (graceful stop signal)
-*   **MAX RETRIES**: 1
-*   **RETRY BACKOFF**: None.
-*   **ON FAILURE**: Logs warning alert to `system_events`.
-*   **TRIGGERS**: Triggered by Celery Beat scheduler once every hour.
-*   **TRIGGERS NEXT**: None.
-
----
-
-### 7. Cleanup Old Jobs
-*   **TASK**: `app.tasks.cron.cleanup_old_jobs`
-*   **QUEUE**: `default`
-*   **PRIORITY**: low
-*   **INPUT**: `{}`
-*   **OUTPUT**: Purges data older than 30 days from `analysis_jobs` and deletes temporary files from Cloudflare R2.
-*   **TIMEOUT**: 300 seconds (hard kill)
-*   **SOFT TIMEOUT**: 240 seconds (graceful stop)
-*   **MAX RETRIES**: 0.
-*   **RETRY BACKOFF**: None.
-*   **ON FAILURE**: Logs failure to `system_events`.
-*   **TRIGGERS**: Triggered by Celery Beat scheduler daily at 00:00 UTC.
-*   **TRIGGERS NEXT**: None.
-
----
+### 4. Planned Auxiliary Tasks (Deferred to Production)
+*   `app.tasks.cron.expire_stale_reviews`: Hourly Celery Beat sweep checking for reviews pending for >48 hours, auto-failing the stale jobs.
+*   `app.tasks.cron.cleanup_old_jobs`: Daily sweep purging temporary repositories and jobs older than 30 days.
 
 ## 5.2 Queue Topology
 

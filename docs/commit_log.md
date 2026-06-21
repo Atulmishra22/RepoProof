@@ -127,6 +127,20 @@ This document tracks every commit made during the development of the **RepoProof
     *   Added WebSocket routing `/api/v1/ws/reviews` backed by Redis Pub/Sub listener to broadcast analysis job status transitions to connected clients.
     *   Added Zustand store `reviewStore.ts` and created the interactive double-column Review Page under `/dashboard/review/[jobId]/page.tsx` with dynamic controls, copy utilities, and action panels.
 
+### Commit 11: Architecture Documentation Sync (Phase 6 Planning)
+*   **Hash**: `Pending`
+*   **Timestamp**: 2026-06-21 20:45:00 UTC+5:30
+*   **Message**: `docs: sync architecture, storage, queue, and roadmap blueprints with Phase 6 design decisions`
+*   **Description**:
+    *   Updated `session_context.md` to reflect Phase 6 transition and detailed instructions.
+    *   Updated `checklist.md` to detail Phase 6 steps, including database models, LaTeX dependencies, ATS optimizer reasoning, and 3-step AI self-healing compiler loops.
+    *   Synced `queue_worker_design.md` with actual task names registered in Celery and documented Phase 6 compile nodes.
+    *   Enriched `storage_design.md` with compiled `.pdf` document support for S3/R2 output storage.
+    *   Updated `docker_architecture.md` with TeX Live dependency installation requirements in backend/worker container images.
+    *   Enriched `observability_design.md` with `latex_compilation_retry_total` Prometheus metrics and structured self-healing warning log examples.
+    *   Synced `frontend_architecture.md` route map and redirects to use dashboard-based routes (`/dashboard/review/[jobId]` and `/dashboard/outputs/[repoId]`).
+    *   Synced `implementation_roadmap.md` with the finalized Phase 6 implementation details.
+
 
 
 

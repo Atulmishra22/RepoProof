@@ -168,61 +168,41 @@
           │
           ▼
 ┌──────────────────────────────────┐
-│   fetch_repository_metadata      │
+│          clone_repo              │ (Git clone & walk file tree)
 └─────────────────┬────────────────┘
                   │
                   ▼
 ┌──────────────────────────────────┐
-│     clone_or_fetch_file_tree     │
+│         extract_facts            │ (Heuristic package scan)
 └─────────────────┬────────────────┘
                   │
                   ▼
 ┌──────────────────────────────────┐
-│        extract_code_facts        │ (LLM Call)
+│       extract_llm_facts          │ (LiteLLM structured facts)
 └─────────────────┬────────────────┘
                   │
                   ▼
 ┌──────────────────────────────────┐
-│          validate_facts          │ (Regex / Rules - No LLM)
+│         validate_facts           │ (Verification of snippets)
 └─────────────────┬────────────────┘
                   │
                   ▼
 ┌──────────────────────────────────┐
-│        store_facts_to_db         │
+│        save_intermediate         │ (Upload drafts, set AWAITING_REVIEW)
 └─────────────────┬────────────────┘
                   │
                   ▼
-  [INTERRUPT: await_human_review]    <--- Execution state saved to DB.
+  [INTERRUPT: await_human_review]    <--- Execution state saved via PostgresSaver.
                   │                       Task suspends.
                   │
-                  ▼ (User posts approved facts to API, triggering resume)
+                  ▼ (User updates facts & clicks Resume, triggering Celery)
 ┌──────────────────────────────────┐
-│    generate_resume_bullets       │ (LLM Call)
-└─────────────────┬────────────────┘
+│       compile_documents          │ (LLM ATS reasoning + LaTeX compiling
+└─────────────────┬────────────────┘  with 3-step AI self-healing compiler loop)
                   │
                   ▼
 ┌──────────────────────────────────┐
-│     generate_linkedin_desc       │ (LLM Call)
-└─────────────────┬────────────────┘
-                  │
-                  ▼
-┌──────────────────────────────────┐
-│         generate_readme          │ (LLM Call)
-└─────────────────┬────────────────┘
-                  │
-                  ▼
-┌──────────────────────────────────┐
-│      generate_portfolio_doc      │ (LLM Call)
-└─────────────────┬────────────────┘
-                  │
-                  ▼
-┌──────────────────────────────────┐
-│        store_all_outputs         │
-└─────────────────┬────────────────┘
-                  │
-                  ▼
-┌──────────────────────────────────┐
-│           notify_user            │ (Websocket / Email trigger)
+│        upload_metadata           │ (Upload final outputs & set COMPLETE)
 └─────────────────┬────────────────┘
                   │
                   ▼
@@ -231,83 +211,59 @@
 
 ### Node Specifications
 
-1.  **`fetch_repository_metadata`**
-    *   *Inputs*: `repo_url`
-    *   *Outputs*: `repo_metadata`
+1.  **`clone_repo`**
+    *   *Inputs*: `github_url`
+    *   *Outputs*: `file_tree`, `local_path`
     *   *LLM Call*: No.
-    *   *Can Fail*: Yes. (e.g., repository is private, or network timeout).
-    *   *Failure Behavior*: Set `error` in state, increment `retry_count`, transitions to `END`.
-2.  **`clone_or_fetch_file_tree`**
-    *   *Inputs*: `repo_url`
-    *   *Outputs*: `file_tree` (as a structured map saved to R2, key path saved in state).
-    *   *LLM Call*: No.
-    *   *Can Fail*: Yes (e.g., repository is too large > 100MB).
-    *   *Failure Behavior*: Abort, set `error`, transitions to `END`.
-3.  **`extract_code_facts`**
-    *   *Inputs*: `file_tree`, `repo_metadata`
-    *   *Outputs*: `extracted_facts`
-    *   *LLM Call*: Yes. Gemini 1.5 Flash. (~150,000 input tokens max context, cost: $0.00).
-    *   *Can Fail*: Yes (Rate limits, token length error).
-    *   *Failure Behavior*: Exponential backoff retry (up to 3 times). If hard fail, transition to `END` with error.
-4.  **`validate_facts`**
-    *   *Inputs*: `extracted_facts`
-    *   *Outputs*: `validated_facts`
-    *   *LLM Call*: No. (Uses fast, rule-based Pydantic models to assert facts contain a valid `evidence_file_path` that exists in the `file_tree`, a `confidence_score` > 0.6, and a non-empty `evidence_snippet`).
-    *   *Can Fail*: No. (Failing facts are filtered out; remaining facts proceed).
-5.  **`store_facts_to_db`**
-    *   *Inputs*: `validated_facts`, `job_id`
-    *   *Outputs*: None (writes directly to Postgres database table `code_facts`).
-    *   *LLM Call*: No.
-    *   *Can Fail*: Yes (DB connection error).
-    *   *Failure Behavior*: Standard transactional rollback, retry database connection twice.
-6.  **`await_human_review` (Interrupt Node)**
-    *   *Inputs*: `validated_facts`
-    *   *Outputs*: `human_approved_facts`, `human_review_status`
-    *   *LLM Call*: No.
-    *   *Can Fail*: No. This node acts as a passive container. The LangGraph compiler uses it as an interrupt boundary.
-7.  **`generate_resume_bullets`**
-    *   *Inputs*: `human_approved_facts`, `target_job_description`
-    *   *Outputs*: `resume_bullets`
-    *   *LLM Call*: Yes. Groq (Llama 3 70B for high-quality professional text output). (~4,000 input tokens. Cost: $0.00).
-    *   *Can Fail*: Yes.
-    *   *Failure Behavior*: Retry up to 3 times, write error to state on total failure.
-8.  **`generate_linkedin_desc`**
-    *   *Inputs*: `human_approved_facts`
-    *   *Outputs*: `linkedin_desc`
-    *   *LLM Call*: Yes. Gemini 1.5 Flash.
-    *   *Can Fail*: Yes.
-9.  **`generate_readme`**
-    *   *Inputs*: `human_approved_facts`
-    *   *Outputs*: `readme_content`
-    *   *LLM Call*: Yes. Gemini 1.5 Flash.
-    *   *Can Fail*: Yes.
-10. **`generate_portfolio_doc`**
-    *   *Inputs*: `human_approved_facts`
-    *   *Outputs*: `portfolio_doc`
-    *   *LLM Call*: Yes. Gemini 1.5 Flash.
-    *   *Can Fail*: Yes.
-11. **`store_all_outputs`**
-    *   *Inputs*: `resume_bullets`, `linkedin_desc`, `readme_content`, `portfolio_doc`
-    *   *Outputs*: None (saves all text fields to Postgres `generated_outputs` and uploads raw backups to Cloudflare R2).
-    *   *LLM Call*: No.
-    *   *Can Fail*: Yes.
-12. **`notify_user`**
-    *   *Inputs*: `job_id`, `error`
-    *   *Outputs*: None (publishes job success/fail event message to Redis WS queue).
+    *   *Can Fail*: Yes. (e.g., repository is private, or git checkout timeout).
+    *   *Failure Behavior*: Set `error` in state, transitions to `upload_metadata`.
+2.  **`extract_facts`**
+    *   *Inputs*: `file_tree`, `local_path`
+    *   *Outputs*: `extracted_facts` (heuristic stack facts)
     *   *LLM Call*: No.
     *   *Can Fail*: No.
+3.  **`extract_llm_facts`**
+    *   *Inputs*: `file_tree`, `local_path`
+    *   *Outputs*: `extracted_facts` (combined heuristic and LLM structured claims)
+    *   *LLM Call*: Yes. LiteLLM (`gpt-4o-mini` routed to `gemini-3.1-flash-lite`).
+    *   *Can Fail*: Yes (Rate limits, API proxy errors).
+    *   *Failure Behavior*: Set `error`, transitions to `upload_metadata`.
+4.  **`validate_facts`**
+    *   *Inputs*: `extracted_facts`, `local_path`
+    *   *Outputs*: `extracted_facts` (filtered, verified facts)
+    *   *LLM Call*: No. (Normalizes whitespace and performs substring searches on cited files to verify evidence snippets).
+5.  **`save_intermediate`**
+    *   *Inputs*: `extracted_facts`, `file_tree`
+    *   *Outputs*: None (uploads draft `analysis_result.json` and `file_tree.json` to MinIO, updates DB status to `AWAITING_REVIEW`, and posts Redis broadcast event).
+    *   *LLM Call*: No.
+    *   *Can Fail*: Yes.
+6.  **`await_human_review` (Interrupt Node)**
+    *   *Inputs*: `extracted_facts`
+    *   *Outputs*: `extracted_facts` (updated with user revisions)
+    *   *LLM Call*: No.
+    *   *Can Fail*: No. Compiled with `interrupt_before=["await_human_review"]` as a checkpoint boundary.
+7.  **`compile_documents`**
+    *   *Inputs*: `extracted_facts`
+    *   *Outputs*: `generated_outputs` (files written to MinIO, and metadata in Postgres)
+    *   *LLM Call*: Yes. LiteLLM (`gpt-4o-mini`).
+    *   *Behavior & AI Self-Healing*:
+        *   **ATS Optimizer Reasoning**: Analyzes facts, chooses active verbs, maps technical keywords to ATS criteria.
+        *   **One-Page Layout Budget**: Spacing and sizes formatted to fit exactly 1 page.
+        *   **LaTeX Compilation**: Outputs LaTeX string, runs `pdflatex` in subprocess. If compilation fails with error codes, reads log file, calls the LLM with error logs for self-healing repair, and retries compilation (up to 3 times).
+        *   **Standard Markdown Output**: Generates LinkedIn Profile Summary, GitHub Profile README, and Developer Portfolio landing page copy.
+8.  **`upload_metadata`**
+    *   *Inputs*: `extracted_facts`, `local_path`
+    *   *Outputs*: None (uploads final compile summaries, marks DB status as `COMPLETE`, publishes Redis complete signal, and purges the cloned local temp directory).
+    *   *LLM Call*: No.
 
 ---
 
 ### LangGraph State Schema Design
 
-The `ResumeAgentState` is defined as a `TypedDict`. Below is the logical data layout:
+The `AnalysisState` is defined as a `TypedDict`. Below is the logical data layout:
 
 | Field Name | Type | Purpose | Writer Node | Reader Node(s) |
 |---|---|---|---|---|
-| `repo_url` | `str` | Target repository to analyze. | Frontend (Init) | `fetch_repository_metadata`, `clone_or_fetch_file_tree` |
-| `repo_metadata` | `dict` | Star count, owner, repo size, languages. | `fetch_repository_metadata` | `extract_code_facts` |
-| `file_tree` | `list[str]` | Flat list of all relative file paths. | `clone_or_fetch_file_tree` | `extract_code_facts`, `validate_facts` |
 | `extracted_facts` | `list[dict]`| Raw, unverified AI claims from code. | `extract_code_facts` | `validate_facts` |
 | `validated_facts` | `list[dict]`| Facts that passed structural rules. | `validate_facts` | `store_facts_to_db`, `await_human_review` |
 | `human_approved_facts`| `list[dict]`| Selected and verified user-approved facts.| User (BFF Input API) | All output generation nodes |
