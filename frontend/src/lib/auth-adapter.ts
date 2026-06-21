@@ -6,8 +6,8 @@ export function PostgresAdapter(): Adapter {
     async createUser(user: Omit<AdapterUser, "id">) {
       const { email, emailVerified, image, name } = user;
       const res = await dbPool.query(
-        `INSERT INTO users (email, "emailVerified", image, name, subscription_tier, is_active)
-         VALUES ($1, $2, $3, $4, 'FREE', true)
+        `INSERT INTO users (email, "emailVerified", image, name, subscription_tier, is_active, auth_provider)
+         VALUES ($1, $2, $3, $4, 'free', true, 'github')
          RETURNING id, email, "emailVerified", image, name`,
         [email, emailVerified, image, name]
       );

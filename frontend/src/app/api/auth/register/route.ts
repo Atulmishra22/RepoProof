@@ -14,10 +14,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const targetTier = subscription_tier || "FREE";
+    const emailLower = email.trim().toLowerCase();
+    const targetTier = (subscription_tier || "free").toLowerCase();
 
     // 1. Check if user already exists
-    const checkRes = await dbPool.query("SELECT * FROM users WHERE email = $1", [email]);
+    const checkRes = await dbPool.query("SELECT * FROM users WHERE email = $1", [emailLower]);
     if (checkRes.rows.length > 0) {
       return NextResponse.json(
         { success: false, error: "User already registered with this email." },
@@ -25,16 +26,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Hash password using PBKDF2
+    // 2. Hash password using PBKDF2 (100,000 iterations for security hardening)
     const salt = crypto.randomBytes(16).toString("hex");
-    const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
-    const passwordHash = `pbkdf2_sha512$1000$${salt}$${hash}`;
+    const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, "sha512").toString("hex");
+    const passwordHash = `pbkdf2_sha512$100000$${salt}$${hash}`;
 
     // 3. Insert user
     await dbPool.query(
-      `INSERT INTO users (email, name, password_hash, subscription_tier, is_active)
-       VALUES ($1, $2, $3, $4, true)`,
-      [email, name || "Developer User", passwordHash, targetTier]
+      `INSERT INTO users (email, name, password_hash, subscription_tier, is_active, auth_provider)
+       VALUES ($1, $2, $3, $4, true, 'credentials')`,
+      [emailLower, name || "Developer User", passwordHash, targetTier]
     );
 
     return NextResponse.json({ success: true, message: "User registered successfully." });

@@ -1036,6 +1036,7 @@ async def export_outputs_zip(
 class UserUpdatePayload(BaseModel):
     name: Optional[str] = None
     subscription_tier: Optional[SubscriptionTier] = None
+    github_username: Optional[str] = None
 
 
 @router.get("/auth/me", tags=["auth"])
@@ -1113,6 +1114,8 @@ async def update_user_profile(
         user.name = payload.name
     if payload.subscription_tier is not None:
         user.subscription_tier = payload.subscription_tier
+    if payload.github_username is not None:
+        user.github_username = payload.github_username.strip() if payload.github_username else None
         
     db.commit()
     
@@ -1133,6 +1136,7 @@ async def update_user_profile(
         "user": {
             "id": str(user.id),
             "name": user.name,
+            "github_username": user.github_username,
             "subscription_tier": user.subscription_tier.value if hasattr(user.subscription_tier, 'value') else user.subscription_tier
         }
     }

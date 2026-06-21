@@ -327,3 +327,48 @@ def resume_analysis_workflow_task(job_id: str, updated_facts: Optional[list] = N
     finally:
         db.close()
 
+
+@celery_app.task(name="app.tasks.cleanup_expired_sessions_task")
+def cleanup_expired_sessions_task():
+    """
+    Periodic task to clean up expired session rows from PostgreSQL
+    and delete matching session cache keys from Redis.
+    """
+    logger.info("Starting expired sessions cleanup task.")
+    db = SessionLocal()
+    from app.models import Session as SessionModel
+    from datetime import datetime, timezone
+    
+    try:
+        now = datetime.now(timezone.utc)
+        # 1. Query expired sessions
+        expired_sessions = db.query(SessionModel).filter(SessionModel.expires < now).all()
+        count = len(expired_sessions)
+        
+        if count > 0:
+            logger.info(f"Found {count} expired sessions to clean up.")
+            for session in expired_sessions:
+                # Delete from Redis cache
+                redis_key = f"session:{session.session_token}"
+                try:
+                    redis_client.srem(f"user_sessions:{session.user_id}", session.session_token)
+                    redis_client.delete(redis_key)
+                except Exception as e:
+                    logger.error(f"Failed to delete redis key for session {session.session_token}: {e}")
+                
+                # Delete from DB
+                db.delete(session)
+            
+            db.commit()
+            logger.info(f"Successfully cleaned up {count} expired sessions from DB and Redis.")
+        else:
+            logger.info("No expired sessions found.")
+            
+        return {"status": "success", "cleaned_count": count}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during expired sessions cleanup: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
+
