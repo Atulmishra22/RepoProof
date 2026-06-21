@@ -9,7 +9,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.redis_client import get_redis, redis_client
-from app.models import User, Repository
+from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus
 
 app = FastAPI(
     title="RepoProof API",
@@ -157,6 +157,128 @@ async def get_repositories(
             for r in repos
         ],
         "profile": profile_data
+    }
+
+
+@router.post("/repositories/{id}/analyze", tags=["analysis"])
+async def trigger_repository_analysis(
+    id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Triggers the LangGraph analysis pipeline in the background for a repository.
+    Creates a new analysis job and updates repository status.
+    """
+    # 1. Fetch Repository record
+    repo = db.query(Repository).filter(Repository.id == id).first()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found."
+        )
+
+    # 2. Check if a job is already queued or active for this repo
+    active_job = db.query(AnalysisJob).filter(
+        AnalysisJob.repository_id == repo.id,
+        AnalysisJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING])
+    ).first()
+    
+    if active_job:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        updated_at = active_job.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        delta = now - updated_at
+        if delta.total_seconds() > 300:  # 5 minutes
+            active_job.status = JobStatus.FAILED
+            active_job.error_message = "Job stalled or interrupted (timeout)."
+            active_job.completed_at = datetime.utcnow()
+            repo.analysis_status = AnalysisStatus.FAILED
+            db.commit()
+            active_job = None
+            
+    if active_job:
+        return {
+            "status": "already_active",
+            "message": f"An analysis job ({active_job.id}) is already active for this repository.",
+            "job_id": str(active_job.id)
+        }
+
+    # 3. Create AnalysisJob record
+    import uuid
+    job_id = uuid.uuid4()
+    job = AnalysisJob(
+        id=job_id,
+        repository_id=repo.id,
+        user_id=repo.user_id,
+        langgraph_thread_id=job_id,
+        status=JobStatus.QUEUED
+    )
+    db.add(job)
+    
+    # 4. Set Repository status to ANALYZING
+    repo.analysis_status = AnalysisStatus.ANALYZING
+    db.commit()
+
+    # 5. Trigger background Celery task
+    from app.tasks import run_analysis_workflow_task
+    try:
+        task = run_analysis_workflow_task.delay(str(repo.id), str(job_id))
+        
+        # 6. Save Celery Task ID in DB
+        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+            "celery_task_id": task.id
+        })
+        db.commit()
+    except Exception as e:
+        # Fallback cleanup on celery fail
+        repo.analysis_status = AnalysisStatus.FAILED
+        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+            "status": JobStatus.FAILED,
+            "error_message": f"Failed to dispatch worker task: {str(e)}"
+        })
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to queue background task: {str(e)}"
+        )
+
+    return {
+        "status": "success",
+        "message": "Analysis workflow queued successfully.",
+        "job_id": str(job_id)
+    }
+
+
+@router.get("/repositories/{id}/analysis/{job_id}", tags=["analysis"])
+async def get_repository_analysis_status(
+    id: str,
+    job_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Returns the status and execution metrics of the repository analysis job.
+    """
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis job not found."
+        )
+
+    return {
+        "job_id": str(job.id),
+        "repository_id": str(job.repository_id),
+        "status": job.status.value if hasattr(job.status, 'value') else job.status,
+        "current_node": job.current_node,
+        "error_message": job.error_message,
+        "llm_tokens_used": job.llm_tokens_used,
+        "llm_cost_usd": float(job.llm_cost_usd),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat()
     }
 
 

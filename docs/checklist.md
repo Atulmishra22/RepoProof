@@ -27,13 +27,13 @@ This checklist tracks the implementation progress of the platform. Items will be
 
 ---
 
-## [ ] Phase 3: Analysis Pipeline (No LLM)
-- [ ] Set up LangGraph 0.2+ orchestrator with PostgreSQL State Checkpointer.
-- [ ] Write file-cloning logic to pull repo branches to temp worker storage.
-- [ ] Write the `clone_or_fetch_file_tree` graph node (builds flat file tree JSON).
-- [ ] Write a heuristic-based fact extractor node (rules checking file count, language weight, dependencies).
-- [ ] Create Celery task `run_analysis_workflow` to run the compiled graph.
-- [ ] **First Milestone Test**: Submitting a repository creates a folder structure and completes analysis without external LLMs.
+## [x] Phase 3: Analysis Pipeline (No LLM)
+- [x] Set up LangGraph 0.2+ orchestrator with PostgreSQL State Checkpointer.
+- [x] Write file-cloning logic to pull repo branches to temp worker storage.
+- [x] Write the `clone_or_fetch_file_tree` graph node (builds flat file tree JSON).
+- [x] Write a heuristic-based fact extractor node (rules checking file count, language weight, dependencies).
+- [x] Create Celery task `run_analysis_workflow` to run the compiled graph.
+- [x] **First Milestone Test**: Submitting a repository creates a folder structure and completes analysis without external LLMs.
 
 ---
 

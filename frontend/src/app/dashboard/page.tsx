@@ -37,12 +37,13 @@ export default function DashboardPage() {
   const [ingesting, setIngesting] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [activeJobs, setActiveJobs] = useState<Record<string, { jobId: string; currentNode: string | null }>>({});
 
   const fetchUserData = async (username: string) => {
     setLoading(true);
     setConnectionError(null);
     try {
-      const response = await fetch(`http://localhost:8000/api/v1/repositories?username=${username}`);
+      const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories?username=${username}`);
       if (response.ok) {
         const data = await response.json();
         setRepositories(data.repositories || []);
@@ -62,6 +63,113 @@ export default function DashboardPage() {
     fetchUserData(currentUsername);
   }, [currentUsername]);
 
+  const handleAnalyze = async (repoId: string) => {
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/analyze`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const jobId = data.job_id;
+        
+        // Add to active jobs
+        setActiveJobs(prev => ({
+          ...prev,
+          [repoId]: { jobId, currentNode: "queued" }
+        }));
+        
+        // Optimistically update repo status in local state
+        setRepositories(prev => 
+          prev.map(r => r.id === repoId ? { ...r, analysis_status: "analyzing" } : r)
+        );
+      } else {
+        const errData = await response.json();
+        alert(`Failed to start analysis: ${errData.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error("Error triggering analysis:", err);
+      alert("Failed to connect to backend to start analysis.");
+    }
+  };
+
+  // Auto-recover jobs on mount/refresh if database repos are already analyzing
+  useEffect(() => {
+    const fetchActiveJobs = async () => {
+      const analyzingRepos = repositories.filter(
+        r => r.analysis_status === "analyzing" && !activeJobs[r.id]
+      );
+      if (analyzingRepos.length === 0) return;
+
+      for (const repo of analyzingRepos) {
+        try {
+          const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repo.id}/analyze`, {
+            method: "POST",
+          });
+          if (response.ok) {
+            const data = await response.json();
+            if (data.job_id) {
+              setActiveJobs(prev => ({
+                ...prev,
+                [repo.id]: { jobId: data.job_id, currentNode: null }
+              }));
+            }
+          }
+        } catch (err) {
+          console.error(`Error auto-recovering job for repo ${repo.name}:`, err);
+        }
+      }
+    };
+    fetchActiveJobs();
+  }, [repositories, activeJobs]);
+
+  // Poll active jobs status from the backend
+  useEffect(() => {
+    const activeRepoIds = Object.keys(activeJobs);
+    if (activeRepoIds.length === 0) return;
+
+    const interval = setInterval(async () => {
+      const updatedJobs = { ...activeJobs };
+      let changed = false;
+      let finishedAny = false;
+
+      await Promise.all(
+        activeRepoIds.map(async (repoId) => {
+          const { jobId } = activeJobs[repoId];
+          try {
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/analysis/${jobId}`);
+            if (res.ok) {
+              const data = await res.json();
+              const status = data.status; // e.g. queued, running, complete, failed
+              const currentNode = data.current_node;
+
+              if (status === "complete" || status === "failed" || status === "timed_out") {
+                delete updatedJobs[repoId];
+                changed = true;
+                finishedAny = true;
+              } else {
+                if (updatedJobs[repoId].currentNode !== currentNode) {
+                  updatedJobs[repoId] = { jobId, currentNode };
+                  changed = true;
+                }
+              }
+            }
+          } catch (err) {
+            console.error(`Error polling job ${jobId}:`, err);
+          }
+        })
+      );
+
+      if (changed) {
+        setActiveJobs(updatedJobs);
+      }
+      if (finishedAny) {
+        fetchUserData(currentUsername);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [activeJobs, currentUsername]);
+
   const handleIngest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!usernameInput.trim()) return;
@@ -70,7 +178,7 @@ export default function DashboardPage() {
     setStatusMessage("Triggering ingestion background task...");
     setConnectionError(null);
     try {
-      const response = await fetch("http://localhost:8000/api/v1/users/ingest", {
+      const response = await fetch("http://127.0.0.1:8000/api/v1/users/ingest", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -401,7 +509,9 @@ export default function DashboardPage() {
                             ? "bg-blue-950/20 text-blue-400 border-blue-900/40 animate-pulse"
                             : "bg-zinc-950/20 text-zinc-400 border-zinc-800"
                         }`}>
-                          {repo.analysis_status}
+                          {repo.analysis_status === "analyzing" && activeJobs[repo.id]?.currentNode
+                            ? `analyzing (${activeJobs[repo.id].currentNode})`
+                            : repo.analysis_status}
                         </span>
                       </div>
 
@@ -427,8 +537,16 @@ export default function DashboardPage() {
                           {repo.star_count}
                         </span>
                         
-                        <button className="opacity-0 group-hover:opacity-100 transition-opacity bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-3 py-1 rounded transition-colors duration-150">
-                          Analyze
+                        <button
+                          onClick={() => handleAnalyze(repo.id)}
+                          disabled={repo.analysis_status === "analyzing"}
+                          className={`transition-all bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-3 py-1 rounded transition-colors duration-150 ${
+                            repo.analysis_status === "analyzing"
+                              ? "opacity-50 cursor-not-allowed"
+                              : "opacity-0 group-hover:opacity-100"
+                          }`}
+                        >
+                          {repo.analysis_status === "analyzing" ? "Analyzing..." : "Analyze"}
                         </button>
                       </div>
                     </div>
