@@ -673,12 +673,20 @@ export default function DashboardPage() {
                         </span>
                         
                         {repo.analysis_status === "complete" ? (
-                          <button
-                            onClick={() => handleViewResults(repo)}
-                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-3.5 py-1.5 rounded transition-colors shadow-[0_0_8px_rgba(16,185,129,0.3)]"
-                          >
-                            View Results
-                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleViewResults(repo)}
+                              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold text-[10px] px-2.5 py-1.5 rounded transition-colors border border-zinc-700"
+                            >
+                              View Facts
+                            </button>
+                            <button
+                              onClick={() => router.push(`/dashboard/outputs/${repo.id}`)}
+                              className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-[10px] px-2.5 py-1.5 rounded transition-all shadow-[0_0_8px_rgba(99,102,241,0.3)]"
+                            >
+                              View Outputs
+                            </button>
+                          </div>
                         ) : repo.analysis_status === "awaiting_review" ? (
                           <button
                             onClick={() => router.push(`/dashboard/review/${repo.latest_job_id}`)}
