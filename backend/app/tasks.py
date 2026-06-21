@@ -192,6 +192,9 @@ def run_analysis_workflow_task(repository_id: str, job_id: str):
             "local_path": "",
             "file_tree": {},
             "extracted_facts": [],
+            "suggested_questions": [],
+            "llm_tokens_used": 0,
+            "llm_cost_usd": 0.0,
             "status": "queued",
             "error": None
         }
