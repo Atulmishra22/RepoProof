@@ -37,24 +37,24 @@ This checklist tracks the implementation progress of the platform. Items will be
 
 ---
 
-## [ ] Phase 4: LLM Integration & Fact Extraction
-- [ ] Deploy local LiteLLM container configured to route calls to the Gemini 1.5 Flash API.
-- [ ] Set up Gemini API keys and test communication.
-- [ ] Write the LLM extraction prompt using structural Pydantic schemas.
-- [ ] Implement `validate_facts` rule-based verification node.
-- [ ] Integrate Langfuse tracing to monitor node operations and token counts.
-- [ ] **First Milestone Test**: Repository parsing returns structured facts citing files and line numbers.
+## [x] Phase 4: LLM Integration & Fact Extraction
+- [x] Deploy local LiteLLM container configured to route calls to the Gemini API (`gemini-3.1-flash-lite`).
+- [x] Set up Gemini API keys and test communication.
+- [x] Write the LLM extraction prompt using structural Pydantic schemas.
+- [x] Implement `validate_facts` rule-based verification node.
+- [x] Integrate Langfuse tracing to monitor node operations and token counts.
+- [x] **First Milestone Test**: Repository parsing returns structured facts citing files and line numbers.
 
 ---
 
-## [ ] Phase 5: Human-In-The-Loop
-- [ ] Insert the `await_human_review` interrupt node inside LangGraph.
-- [ ] Write the FastAPI WebSocket gateway to broadcast updates using Redis Pub/Sub.
-- [ ] Implement Next.js Zustand stores (`useAnalysisStore`, `useReviewStore`) to track real-time job states.
-- [ ] Build the interactive Review checklist UI on the frontend.
-- [ ] Create REST routes `GET /api/v1/reviews/{id}` and `PATCH /api/v1/reviews/{id}/facts`.
-- [ ] Hook up Celery task `resume_analysis_workflow` to load database checkpoints.
-- [ ] **First Milestone Test**: Analysis halts at review node, updates UI, and resumes upon user confirmation.
+## [x] Phase 5: Human-In-The-Loop
+- [x] Insert the `await_human_review` interrupt node inside LangGraph.
+- [x] Write the FastAPI WebSocket gateway to broadcast updates using Redis Pub/Sub.
+- [x] Implement Next.js Zustand stores (`useAnalysisStore`, `useReviewStore`) to track real-time job states.
+- [x] Build the interactive Review checklist UI on the frontend.
+- [x] Create REST routes `GET /api/v1/reviews/{id}` and `PATCH /api/v1/reviews/{id}/facts`.
+- [x] Hook up Celery task `resume_analysis_workflow` to load database checkpoints.
+- [x] **First Milestone Test**: Analysis halts at review node, updates UI, and resumes upon user confirmation.
 
 ---
 

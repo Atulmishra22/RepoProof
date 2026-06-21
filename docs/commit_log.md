@@ -105,6 +105,29 @@ This document tracks every commit made during the development of the **RepoProof
     *   Extended main database router to self-heal stalled background analysis tasks.
     *   Connected frontend dashboard cards to trigger analysis, recover active jobs, poll real-time status, and display currently executing LangGraph nodes.
 
+### Commit 9: Phase 4 LLM Integration & Fact Extraction
+*   **Hash**: `c064edd`
+*   **Timestamp**: 2026-06-21 17:31:00 UTC+5:30
+*   **Message**: `feat: implement LLM fact extraction, validation nodes, pricing config, and dashboard UI display`
+*   **Description**:
+    *   Configured LiteLLM proxy inside `config.yaml` to route `gpt-4o-mini` to `gemini/gemini-3.1-flash-lite` using active credentials.
+    *   Created structured Pydantic schemas `ExtractedFact` and `FactExtractionResult` in `llm_schemas.py`.
+    *   Implemented `extract_llm_facts_node` and rule-based `validate_facts_node` inside `analysis_graph.py` to fetch, validate, and verify snippets.
+    *   Integrated Langfuse tracing to log runs, monitor token usage, and record exact running cost in Postgres.
+    *   Exposed `/api/v1/repositories/{id}/analysis-result` in `main.py` and developed a premium modal UI on dashboard to render results.
+
+### Commit 10: Phase 5 Human-In-The-Loop Review
+*   **Hash**: `1204df2`
+*   **Timestamp**: 2026-06-21 19:55:00 UTC+5:30
+*   **Message**: `feat: implement Phase 5 human-in-the-loop review pipeline, WebSockets status broadcasting, and Zustand review UI`
+*   **Description**:
+    *   Added intermediate result saving node and pass-through review node in `analysis_graph.py`, compiling the workflow with `interrupt_before=["await_human_review"]`.
+    *   Modified Celery tasks inside `tasks.py` to handle the graph interrupt state and added `resume_analysis_workflow_task`.
+    *   Implemented FastAPI REST endpoints `/reviews/{job_id}/facts` (updating checkpointer state and resuming graph) and `/reviews/{job_id}/chat` (interactive AI pairing partner using codebase context).
+    *   Added WebSocket routing `/api/v1/ws/reviews` backed by Redis Pub/Sub listener to broadcast analysis job status transitions to connected clients.
+    *   Added Zustand store `reviewStore.ts` and created the interactive double-column Review Page under `/dashboard/review/[jobId]/page.tsx` with dynamic controls, copy utilities, and action panels.
+
+
 
 
 
