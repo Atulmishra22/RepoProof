@@ -1,6 +1,9 @@
 import os
 import shutil
 import logging
+import time
+import subprocess
+import tempfile
 from typing import TypedDict, List, Dict, Any, Optional
 import git
 import boto3
@@ -12,9 +15,9 @@ from langfuse import Langfuse, propagate_attributes
 from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 from app.database import SessionLocal
-from app.models import Repository, AnalysisJob, AnalysisStatus, JobStatus
+from app.models import Repository, AnalysisJob, AnalysisStatus, JobStatus, GeneratedOutput, OutputType
 from app.checkpointer import get_checkpointer
-from app.llm_schemas import FactExtractionResult
+from app.llm_schemas import FactExtractionResult, LaTeXResumeResponse, LaTeXSelfHealingResponse, MarkdownOutputsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -631,6 +634,461 @@ def await_human_review_node(state: AnalysisState, config: Optional[RunnableConfi
     logger.info("Resuming execution from human review checkpoint...")
     return {"status": "review_completed"}
 
+def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    if state.get("error"):
+        return {}
+        
+    repo_id = state["repository_id"]
+    approved_facts = state.get("extracted_facts", [])
+    
+    job_id = None
+    if config:
+        job_id = config.get("configurable", {}).get("thread_id")
+        
+    if job_id:
+        db = SessionLocal()
+        try:
+            db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                "current_node": "compile_documents",
+                "status": JobStatus.RUNNING,
+                "updated_at": datetime.utcnow()
+            })
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to update current_node to compile_documents: {e}")
+        finally:
+            db.close()
+            
+    logger.info(f"Compiling documents for repo {repo_id}, job {job_id} using {len(approved_facts)} approved facts...")
+    
+    # 1. Query User details from Database and Redis
+    db = SessionLocal()
+    user_name = "Developer"
+    user_email = ""
+    github_username = ""
+    bio = ""
+    user_id = None
+    try:
+        repo = db.query(Repository).filter(Repository.id == repo_id).first()
+        if repo:
+            user_id = repo.user_id
+            from app.models import User
+            user = db.query(User).filter(User.id == repo.user_id).first()
+            if user:
+                github_username = user.github_username or ""
+                user_email = user.email or ""
+                user_name = github_username
+                
+                if github_username:
+                    try:
+                        from app.redis_client import redis_client
+                        profile_str = redis_client.get(f"github_profile:{github_username}")
+                        if profile_str:
+                            profile_data = json.loads(profile_str)
+                            user_name = profile_data.get("name") or user_name
+                            user_email = profile_data.get("email") or user_email
+                            bio = profile_data.get("bio") or ""
+                    except Exception as redis_err:
+                        logger.warning(f"Failed to fetch profile from Redis: {redis_err}")
+    except Exception as e:
+        logger.error(f"Error querying user metadata: {e}")
+    finally:
+        db.close()
+
+    # If no user_id found, use a fallback
+    user_id_str = str(user_id) if user_id else "system"
+
+    # Helper for LLM Calls
+    def call_llm(messages: List[Dict[str, str]], schema: Any) -> Dict[str, Any]:
+        with propagate_attributes(user_id=repo_id, session_id=str(job_id) if job_id else None):
+            with langfuse.start_as_current_observation(
+                as_type="generation",
+                name="document_generation",
+                model=MODEL_NAME,
+                input=messages,
+                model_parameters={"temperature": 0.2}
+            ) as generation:
+                response = httpx.post(
+                    f"{LITELLM_PROXY_URL}/v1/chat/completions",
+                    json={
+                        "model": MODEL_NAME,
+                        "messages": messages,
+                        "temperature": 0.2,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": schema.__name__,
+                                "schema": schema.model_json_schema(),
+                                "strict": True
+                            }
+                        }
+                    },
+                    timeout=120.0
+                )
+                response.raise_for_status()
+                resp_data = response.json()
+                
+                usage = resp_data.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                
+                content = resp_data["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                
+                generation.update(
+                    output=content,
+                    usage_details={
+                        "input": prompt_tokens,
+                        "output": completion_tokens,
+                        "total": prompt_tokens + completion_tokens
+                    }
+                )
+                return {
+                    "parsed": parsed,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens
+                }
+
+    # Helper for compiler self-healing LLM call
+    def call_self_healing_llm(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        from app.llm_schemas import LaTeXSelfHealingResponse
+        return call_llm(messages, LaTeXSelfHealingResponse)
+
+    # 2. Compile LaTeX Resume to PDF with AI Self-Healing Loop
+    facts_str = json.dumps(approved_facts, indent=2)
+    messages_resume = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert Senior Technical Recruiter and professional LaTeX designer.\n"
+                "Your task is to compile a LaTeX developer resume using the candidate's verified repository facts.\n\n"
+                "Step 1: ATS Optimizer Reasoning Pass\n"
+                "Analyze the candidate's tech stack and code facts. Map technical keywords to standard ATS categories, select high-impact action verbs (e.g. 'Architected', 'Optimized', 'Configured') in active voice, and formulate a page-budget plan to fit the content onto exactly one page.\n\n"
+                "Step 2: LaTeX Code Generation\n"
+                "Generate a complete, compilation-ready LaTeX resume using standard packages (like fullpage, titlesec, enumitem, hyperref, geometry).\n"
+                "Guidelines:\n"
+                "- Name: [NAME], Email: [EMAIL], GitHub: [GITHUB], LinkedIn: [LINKEDIN]\n"
+                "- Strictly limit the length to EXACTLY one page. Reduce spacing, margins (e.g. \\addtolength{\\oddsidemargin}{-0.5in}, \\addtolength{\\topmargin}{-0.5in}), and item spacing to guarantee a single-page budget.\n"
+                "- Write out the LaTeX code inside the json field `latex_code`.\n"
+                "- Do NOT escape LaTeX characters in the JSON output (e.g. write \\section, not \\\\section, but make sure to escape special characters in LaTeX text properly like \\% for percent, \\& for ampersand, and \\_ for underscores)."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Candidate Name: {user_name}\n"
+                f"Candidate Email: {user_email}\n"
+                f"GitHub Link: github.com/{github_username}\n"
+                f"LinkedIn Link: linkedin.com/in/{github_username}\n"
+                f"Brief Bio: {bio}\n\n"
+                f"Approved Technical Facts:\n{facts_str}"
+            )
+        }
+    ]
+    
+    logger.info("Calling LLM to generate initial LaTeX resume...")
+    from app.llm_schemas import LaTeXResumeResponse
+    start_time = time.time()
+    try:
+        res_resume = call_llm(messages_resume, LaTeXResumeResponse)
+        latex_code = res_resume["parsed"]["latex_code"]
+        ats_reasoning = res_resume["parsed"]["ats_reasoning"]
+        prompt_tokens_res = res_resume["prompt_tokens"]
+        completion_tokens_res = res_resume["completion_tokens"]
+    except Exception as e:
+        logger.exception(f"Failed to generate initial LaTeX resume: {e}")
+        return {"status": "failed", "error": f"LaTeX generation error: {str(e)}"}
+
+    # Define LaTeX compile helper
+    def compile_latex(latex_content: str, output_dir: str) -> str:
+        tex_path = os.path.join(output_dir, "resume.tex")
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(latex_content)
+        
+        # Run pdflatex twice
+        for i in range(2):
+            res = subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "resume.tex"],
+                cwd=output_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            if res.returncode != 0:
+                log_path = os.path.join(output_dir, "resume.log")
+                log_tail = ""
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                        lines = lf.readlines()
+                        log_tail = "".join(lines[-30:])
+                raise RuntimeError(f"pdflatex compilation failed (exit code {res.returncode}):\n{log_tail}")
+                
+        pdf_path = os.path.join(output_dir, "resume.pdf")
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError("Compiled PDF file not found after successful compilation run.")
+        return pdf_path
+
+    # Self-healing loop
+    compile_success = False
+    error_log = ""
+    retry_count = 0
+    max_retries = 3
+    pdf_bytes = b""
+    
+    while not compile_success and retry_count <= max_retries:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                logger.info(f"LaTeX compile attempt {retry_count}...")
+                pdf_path = compile_latex(latex_code, tmpdir)
+                with open(pdf_path, "rb") as pdf_file:
+                    pdf_bytes = pdf_file.read()
+                compile_success = True
+                logger.info("LaTeX resume compiled successfully!")
+                
+                # Clear error message on success
+                if job_id:
+                    db = SessionLocal()
+                    try:
+                        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                            "error_message": f"LaTeX compiled successfully with {retry_count} self-healing iterations." if retry_count > 0 else None,
+                            "updated_at": datetime.utcnow()
+                        })
+                        db.commit()
+                    except Exception as db_err:
+                        logger.error(f"Failed to clear error_message: {db_err}")
+                    finally:
+                        db.close()
+            except Exception as compile_err:
+                error_log = str(compile_err)
+                logger.warning(f"LaTeX compile attempt {retry_count} failed: {error_log}")
+                
+                # Log diagnostic to database
+                if job_id:
+                    db = SessionLocal()
+                    try:
+                        db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                            "error_message": f"LaTeX compilation attempt {retry_count} failed:\n{error_log}",
+                            "updated_at": datetime.utcnow()
+                        })
+                        db.commit()
+                    except Exception as db_err:
+                        logger.error(f"Failed to log self-healing diagnostic: {db_err}")
+                    finally:
+                        db.close()
+                
+                if retry_count == max_retries:
+                    break
+                
+                retry_count += 1
+                
+                # Call LLM to diagnose and heal
+                try:
+                    logger.info("Invoking AI Self-Healing LLM pass...")
+                    messages_healing = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an expert LaTeX compiler and troubleshooter.\n"
+                                "The user is trying to compile a LaTeX resume, but the compilation failed with a pdflatex error.\n"
+                                "Analyze the invalid LaTeX code and the compiler log tail, diagnose the root cause (e.g. unescaped characters like %, &, _, missing packages, mismatched brackets), and output the corrected, complete LaTeX code.\n\n"
+                                "Important guidelines:\n"
+                                "- Do NOT truncate or write partial code. Output the COMPLETE corrected LaTeX source code.\n"
+                                "- Ensure it adheres strictly to a single-page budget."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"--- INVALID LATEX CODE ---\n{latex_code}\n\n"
+                                f"--- COMPILER LOG ERROR ---\n{error_log}\n\n"
+                                "Please output the corrected LaTeX code in the structured JSON response format."
+                            )
+                        }
+                    ]
+                    res_healing = call_self_healing_llm(messages_healing)
+                    latex_code = res_healing["parsed"]["latex_code"]
+                    diagnosed_cause = res_healing["parsed"]["diagnosed_cause"]
+                    logger.info(f"Self-Healing Diagnosis: {diagnosed_cause}")
+                    
+                    # Accumulate token counts
+                    prompt_tokens_res += res_healing["prompt_tokens"]
+                    completion_tokens_res += res_healing["completion_tokens"]
+                except Exception as heal_err:
+                    logger.error(f"Failed to run AI Self-Healing LLM pass: {heal_err}")
+                    break
+
+    if not compile_success:
+        logger.error("LaTeX resume compilation failed after maximum self-healing retries.")
+        return {
+            "status": "failed",
+            "error": f"LaTeX compiler failed: {error_log}"
+        }
+
+    # 3. Generate Markdown Outputs (LinkedIn, README, Portfolio)
+    messages_md = [
+        {
+            "role": "system",
+            "content": (
+                "You are a stellar Developer Relations Manager and copywriter.\n"
+                "Your task is to synthesize the candidate's approved repository facts into three cohesive marketing documents:\n"
+                "1. LinkedIn Project Description: A professional, compelling LinkedIn summary of the project's features and achievements.\n"
+                "2. GitHub Profile README: A beautifully structured markdown README.md for this repository detailing features, architecture, setup/install instructions, and a quickstart guide.\n"
+                "3. Developer Portfolio Page: A detailed project breakdown page highlighting design trade-offs, tech stack complexity, and security/performance optimizations."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Project Owner: {user_name}\n"
+                f"Project URL: {state.get('github_url')}\n"
+                f"Approved Technical Facts:\n{facts_str}"
+            )
+        }
+    ]
+    
+    logger.info("Calling LLM to generate Markdown documents (LinkedIn, README, Portfolio)...")
+    from app.llm_schemas import MarkdownOutputsResponse
+    try:
+        res_md = call_llm(messages_md, MarkdownOutputsResponse)
+        linkedin_summary = res_md["parsed"]["linkedin_summary"]
+        github_readme = res_md["parsed"]["github_readme"]
+        developer_portfolio = res_md["parsed"]["developer_portfolio"]
+        prompt_tokens_md = res_md["prompt_tokens"]
+        completion_tokens_md = res_md["completion_tokens"]
+    except Exception as e:
+        logger.exception(f"Failed to generate Markdown documents: {e}")
+        return {"status": "failed", "error": f"Markdown generation error: {str(e)}"}
+
+    # 4. Upload all files to MinIO and register in database
+    s3 = get_s3_client()
+    bucket_name = "repoproof-data"
+    
+    # Ensure MinIO bucket exists
+    try:
+        s3.create_bucket(Bucket=bucket_name)
+    except s3.exceptions.BucketAlreadyExists:
+        pass
+    except s3.exceptions.BucketAlreadyOwnedByYou:
+        pass
+
+    # Helper to upload file to MinIO
+    def upload_to_minio(key: str, body: Any, content_type: str):
+        logger.info(f"Uploading output to MinIO: {key}...")
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=key,
+            Body=body,
+            ContentType=content_type
+        )
+
+    # Helper to register GeneratedOutput
+    def register_generated_output(output_type: OutputType, content: str, object_key: str, p_tok: int, c_tok: int, dur_ms: int):
+        if not job_id:
+            return
+        db = SessionLocal()
+        try:
+            from app.models import GeneratedOutput
+            existing = db.query(GeneratedOutput).filter(
+                GeneratedOutput.analysis_job_id == job_id,
+                GeneratedOutput.output_type == output_type
+            ).first()
+            
+            if existing:
+                existing.version += 1
+                existing.content = content
+                existing.minio_object_key = object_key
+                existing.llm_model_used = MODEL_NAME
+                existing.prompt_tokens = p_tok
+                existing.completion_tokens = c_tok
+                existing.generation_duration_ms = dur_ms
+                existing.updated_at = datetime.utcnow()
+            else:
+                new_out = GeneratedOutput(
+                    analysis_job_id=job_id,
+                    output_type=output_type,
+                    content=content,
+                    version=1,
+                    is_current_version=True,
+                    llm_model_used=MODEL_NAME,
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    generation_duration_ms=dur_ms,
+                    minio_object_key=object_key
+                )
+                db.add(new_out)
+            db.commit()
+        except Exception as err:
+            logger.error(f"Failed to register GeneratedOutput for {output_type}: {err}")
+            db.rollback()
+        finally:
+            db.close()
+
+    # Upload & register outputs
+    key_prefix = f"outputs/{user_id_str}/{job_id if job_id else 'temp'}"
+    
+    # Resume (.pdf and .tex)
+    resume_pdf_key = f"{key_prefix}/resume.pdf"
+    resume_tex_key = f"{key_prefix}/resume.tex"
+    upload_to_minio(resume_pdf_key, pdf_bytes, "application/pdf")
+    upload_to_minio(resume_tex_key, latex_code, "application/x-tex")
+    
+    dur_ms_res = int((time.time() - start_time) * 1000)
+    register_generated_output(
+        OutputType.RESUME_BULLETS,
+        latex_code,
+        resume_pdf_key,
+        prompt_tokens_res,
+        completion_tokens_res,
+        dur_ms_res
+    )
+    
+    # LinkedIn
+    linkedin_key = f"{key_prefix}/linkedin.md"
+    upload_to_minio(linkedin_key, linkedin_summary, "text/markdown")
+    register_generated_output(
+        OutputType.LINKEDIN_DESC,
+        linkedin_summary,
+        linkedin_key,
+        prompt_tokens_md,
+        completion_tokens_md,
+        dur_ms_res
+    )
+    
+    # README
+    readme_key = f"{key_prefix}/readme.md"
+    upload_to_minio(readme_key, github_readme, "text/markdown")
+    register_generated_output(
+        OutputType.README,
+        github_readme,
+        readme_key,
+        prompt_tokens_md,
+        completion_tokens_md,
+        dur_ms_res
+    )
+    
+    # Portfolio
+    portfolio_key = f"{key_prefix}/portfolio.md"
+    upload_to_minio(portfolio_key, developer_portfolio, "text/markdown")
+    register_generated_output(
+        OutputType.PORTFOLIO_DOC,
+        developer_portfolio,
+        portfolio_key,
+        prompt_tokens_md,
+        completion_tokens_md,
+        dur_ms_res
+    )
+
+    # Accumulate tokens used
+    total_prompt = prompt_tokens_res + prompt_tokens_md
+    total_comp = completion_tokens_res + completion_tokens_md
+    total_cost = (total_prompt * 0.10 + total_comp * 0.40) / 1000000.0
+
+    return {
+        "llm_tokens_used": state.get("llm_tokens_used", 0) + total_prompt + total_comp,
+        "llm_cost_usd": float(state.get("llm_cost_usd", 0.0)) + total_cost,
+        "status": "documents_compiled"
+    }
+
 # Build LangGraph Workflow
 workflow = StateGraph(AnalysisState)
 
@@ -640,6 +1098,7 @@ workflow.add_node("extract_llm_facts", extract_llm_facts_node)
 workflow.add_node("validate_facts", validate_facts_node)
 workflow.add_node("save_intermediate", save_intermediate_results_node)
 workflow.add_node("await_human_review", await_human_review_node)
+workflow.add_node("compile_documents", compile_documents_node)
 workflow.add_node("upload_metadata", upload_metadata_node)
 
 # Define edges
@@ -649,7 +1108,8 @@ workflow.add_edge("extract_facts", "extract_llm_facts")
 workflow.add_edge("extract_llm_facts", "validate_facts")
 workflow.add_edge("validate_facts", "save_intermediate")
 workflow.add_edge("save_intermediate", "await_human_review")
-workflow.add_edge("await_human_review", "upload_metadata")
+workflow.add_edge("await_human_review", "compile_documents")
+workflow.add_edge("compile_documents", "upload_metadata")
 workflow.add_edge("upload_metadata", END)
 
 # Compile graph with persistence
