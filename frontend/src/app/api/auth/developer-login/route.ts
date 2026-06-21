@@ -5,7 +5,7 @@ import crypto from "crypto";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const email = body.email || "developer@repoproof.com";
+    const email = body.email;
     const password = body.password;
 
     if (!email || !password) {
@@ -15,20 +15,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const emailLower = email.trim().toLowerCase();
+
     // 1. Get user
-    let userRes = await dbPool.query("SELECT * FROM users WHERE email = $1", [email]);
+    let userRes = await dbPool.query("SELECT * FROM users WHERE email = $1", [emailLower]);
     let user = userRes.rows[0];
 
     // Auto-seed developer@repoproof.com with password 'devpass' if it does not exist
-    if (!user && email === "developer@repoproof.com") {
+    if (!user && emailLower === "developer@repoproof.com") {
       const salt = crypto.randomBytes(16).toString("hex");
-      const hash = crypto.pbkdf2Sync("devpass", salt, 1000, 64, "sha512").toString("hex");
-      const passwordHash = `pbkdf2_sha512$1000$${salt}$${hash}`;
+      const hash = crypto.pbkdf2Sync("devpass", salt, 100000, 64, "sha512").toString("hex");
+      const passwordHash = `pbkdf2_sha512$100000$${salt}$${hash}`;
       const insertRes = await dbPool.query(
-        `INSERT INTO users (email, name, password_hash, subscription_tier, is_active)
-         VALUES ($1, 'Developer User', $2, 'PRO', true)
+        `INSERT INTO users (email, name, password_hash, subscription_tier, is_active, auth_provider)
+         VALUES ($1, 'Developer User', $2, 'pro', true, 'credentials')
          RETURNING *`,
-        [email, passwordHash]
+        [emailLower, passwordHash]
       );
       user = insertRes.rows[0];
     }
@@ -50,9 +52,10 @@ export async function POST(req: NextRequest) {
     // 2. Verify password hash
     try {
       const parts = user.password_hash.split("$");
+      const iterations = parseInt(parts[1], 10) || 1000;
       const salt = parts[2];
       const storedHash = parts[3];
-      const incomingHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+      const incomingHash = crypto.pbkdf2Sync(password, salt, iterations, 64, "sha512").toString("hex");
 
       if (incomingHash !== storedHash) {
         return NextResponse.json(
@@ -68,12 +71,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Update subscription tier in development if specified
-    if (body.subscription_tier && body.subscription_tier !== user.subscription_tier) {
+    if (body.subscription_tier && body.subscription_tier.toLowerCase() !== user.subscription_tier) {
+      const tierLower = body.subscription_tier.toLowerCase();
       await dbPool.query(
         "UPDATE users SET subscription_tier = $1 WHERE id = $2",
-        [body.subscription_tier, user.id]
+        [tierLower, user.id]
       );
-      user.subscription_tier = body.subscription_tier;
+      user.subscription_tier = tierLower;
     }
 
     // 3. Generate session token

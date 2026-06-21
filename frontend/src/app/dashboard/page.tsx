@@ -36,11 +36,38 @@ export default function DashboardPage() {
   const handleSignOut = async () => {
     await signOut({ callbackUrl: "/login" });
   };
+  const [authUser, setAuthUser] = useState<any>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [usernameInput, setUsernameInput] = useState("");
-  const [currentUsername, setCurrentUsername] = useState("Atulmishra22");
+  const [currentUsername, setCurrentUsername] = useState("");
   const [profile, setProfile] = useState<Profile | null>(null);
   const [repositories, setRepositories] = useState<Repository[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchAuthProfile() {
+      try {
+        const res = await fetch("http://localhost:8000/api/v1/auth/me");
+        if (res.ok) {
+          const data = await res.json();
+          setAuthUser(data);
+          if (data.github_username) {
+            setCurrentUsername(data.github_username);
+          } else {
+            setLoading(false);
+          }
+        } else {
+          router.push("/login");
+        }
+      } catch (err) {
+        setConnectionError("Failed to verify authenticated session with backend.");
+        setLoading(false);
+      } finally {
+        setAuthLoading(false);
+      }
+    }
+    fetchAuthProfile();
+  }, []);
   const [ingesting, setIngesting] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -112,7 +139,9 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    fetchUserData(currentUsername);
+    if (currentUsername) {
+      fetchUserData(currentUsername);
+    }
   }, [currentUsername]);
 
   const handleAnalyze = async (repoId: string) => {
@@ -367,6 +396,144 @@ export default function DashboardPage() {
       </div>
     );
   };
+
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 text-zinc-100 font-sans antialiased">
+        <div className="flex flex-col items-center gap-3">
+          <svg className="animate-spin h-8 w-8 text-blue-500" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+          </svg>
+          <span className="text-sm text-zinc-500 font-medium">Verifying Session...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (authUser && !authUser.github_username) {
+    return (
+      <div className="flex min-h-screen flex-col bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-blue-600/30 selection:text-blue-200">
+        <header className="sticky top-0 z-50 border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md">
+          <div className="mx-auto flex max-w-7xl h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center gap-4">
+              <span className="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-blue-400 via-indigo-400 to-cyan-400">
+                RepoProof
+              </span>
+              <span className="rounded-full border border-blue-900/30 bg-blue-950/30 px-2.5 py-0.5 text-xs font-semibold text-blue-400">
+                Repository Intelligence
+              </span>
+            </div>
+            <button
+              onClick={handleSignOut}
+              className="rounded-lg bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:text-white transition-all cursor-pointer"
+            >
+              Sign Out
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1 flex items-center justify-center px-4 py-12">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-900 bg-zinc-900/30 backdrop-blur-xl p-8 shadow-2xl relative">
+            <div className="absolute top-0 right-0 -translate-y-1/2 translate-x-1/2 w-48 h-48 bg-blue-500/5 rounded-full blur-3xl pointer-events-none" />
+            
+            <div className="flex flex-col items-center text-center mb-6">
+              <div className="inline-flex items-center justify-center h-12 w-12 rounded-2xl bg-zinc-900 border border-zinc-800 mb-4 text-zinc-300">
+                <svg className="h-6 w-6 fill-current" viewBox="0 0 24 24">
+                  <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold text-white">Connect GitHub Profile</h2>
+              <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
+                Welcome to RepoProof! To analyze your repositories and compile resume metrics, link your public GitHub account.
+              </p>
+            </div>
+
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              if (!usernameInput.trim()) return;
+              setLoading(true);
+              setIngesting(true);
+              setStatusMessage("Linking profile and starting repository ingestion...");
+              try {
+                const updateRes = await fetch("http://localhost:8000/api/v1/users/me", {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ github_username: usernameInput.trim() })
+                });
+                
+                if (!updateRes.ok) {
+                  throw new Error("Failed to link GitHub username on backend.");
+                }
+
+                const updateData = await updateRes.json();
+                
+                const ingestRes = await fetch("http://localhost:8000/api/v1/users/ingest", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ username: usernameInput.trim() })
+                });
+
+                if (ingestRes.ok) {
+                  setStatusMessage("Ingestion task triggered! Importing code file trees...");
+                  setAuthUser(updateData.user);
+                  setCurrentUsername(usernameInput.trim());
+                  
+                  let attempts = 0;
+                  const interval = setInterval(async () => {
+                    attempts++;
+                    await fetchUserData(usernameInput.trim());
+                    if (attempts >= 4) {
+                      clearInterval(interval);
+                      setIngesting(false);
+                      setStatusMessage("");
+                    }
+                  }, 2500);
+                } else {
+                  throw new Error("Failed to start ingestion task.");
+                }
+              } catch (err: any) {
+                setConnectionError(err.message || "Failed to link and ingest GitHub profile.");
+                setIngesting(false);
+                setLoading(false);
+              }
+            }} className="space-y-4">
+              <div>
+                <label htmlFor="github_username_onboarding" className="block text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">
+                  GitHub Username
+                </label>
+                <input
+                  type="text"
+                  id="github_username_onboarding"
+                  required
+                  placeholder="e.g. Atulmishra22"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value)}
+                  className="block w-full h-11 px-4 rounded-xl border border-zinc-900 bg-zinc-900/10 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 text-sm placeholder-zinc-600 transition-all outline-none"
+                  disabled={ingesting}
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={ingesting || !usernameInput.trim()}
+                className="flex h-11 w-full items-center justify-center rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 font-semibold text-white hover:from-blue-500 hover:to-indigo-500 active:scale-[0.98] transition-all duration-200 shadow-lg shadow-blue-900/20 disabled:opacity-50 disabled:pointer-events-none cursor-pointer text-sm"
+              >
+                {ingesting ? "Linking & Importing..." : "Link & Ingest Profile"}
+              </button>
+            </form>
+
+            {statusMessage && (
+              <div className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-400 flex items-start gap-2.5">
+                <span className="flex h-2 w-2 rounded-full bg-blue-500 animate-ping mt-1" />
+                <span className="leading-relaxed">{statusMessage}</span>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-blue-600/30 selection:text-blue-200">
