@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { signOut } from "next-auth/react";
 
 interface Repository {
   id: string;
@@ -32,6 +33,9 @@ interface Profile {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const handleSignOut = async () => {
+    await signOut({ callbackUrl: "/login" });
+  };
   const [usernameInput, setUsernameInput] = useState("");
   const [currentUsername, setCurrentUsername] = useState("Atulmishra22");
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -377,9 +381,17 @@ export default function DashboardPage() {
               Repository Intelligence
             </span>
           </div>
-          <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 px-3 py-1.5 rounded-lg flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-            <span>Connected Profile: <strong className="text-zinc-200">{currentUsername}</strong></span>
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 px-3 py-1.5 rounded-lg flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+              <span>Connected Profile: <strong className="text-zinc-200">{currentUsername}</strong></span>
+            </div>
+            <button
+              onClick={handleSignOut}
+              className="rounded-lg bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:text-white transition-all cursor-pointer"
+            >
+              Sign Out
+            </button>
           </div>
         </div>
       </header>
