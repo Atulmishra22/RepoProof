@@ -227,21 +227,37 @@ RESPONSE (errors):
 RATE LIMIT: 10 requests per minute per user  
 TRIGGERS: None (updates database job status to `failed` and terminates the run).  
 
-### PATCH /reviews/{review_id}/facts
-ENDPOINT: PATCH /api/v1/reviews/{review_id}/facts  
-DESCRIPTION: Submits a custom payload containing edited, approved, or rejected facts. Once processing completes, it transitions the review to `approved` (or `edited`) and resumes the pipeline.  
+### PATCH /reviews/{job_id}/facts
+ENDPOINT: PATCH /api/v1/reviews/{job_id}/facts  
+DESCRIPTION: Submits a custom payload containing edited, approved, or custom facts. Resumes the paused LangGraph workflow with the revised state.  
 AUTH: required  
-ASYNC: yes (returns { "status": "resumed" })  
+ASYNC: yes (returns status)  
 REQUEST:  
   Body:  
-    `{ "approved_fact_ids": [ "UUID" ], "edited_facts": [ { "id": "UUID", "fact_text": "string — edited claim statement", "fact_type": "string" } ], "rejected_fact_ids": [ "UUID" ] }`  
+    `{ "facts": [ { "category": "string", "claim": "string", "source_file": "string", "snippet": "string", "ats_impact": "string" } ] }`  
 RESPONSE (200):  
-  `{ "review_id": "UUID", "status": "edited", "analysis_job_id": "UUID" }`  
+  `{ "status": "success", "message": "Analysis resume triggered successfully with updated facts." }`  
 RESPONSE (errors):  
   400: Invalid schema or review is not pending  
   401: Unauthorized  
 RATE LIMIT: 10 requests per minute per user  
-TRIGGERS: Celery task: `resume_analysis_workflow` with the modified state payload.  
+TRIGGERS: Celery task: `resume_analysis_workflow_task` with the updated facts payload.  
+
+### POST /reviews/{job_id}/chat
+ENDPOINT: POST /api/v1/reviews/{job_id}/chat  
+DESCRIPTION: Interactive AI coding/recruiting chat assistant that helps developers modify, draft, or understand their facts in context of key files.  
+AUTH: required  
+ASYNC: no (blocking response)  
+REQUEST:  
+  Body:  
+    `{ "message": "string", "facts": [ { "category": "string", "claim": "string", "source_file": "string", "snippet": "string", "ats_impact": "string" } ] }`  
+RESPONSE (200):  
+  `{ "reply": "string — AI assistant response" }`  
+RESPONSE (errors):  
+  400: Invalid payload schema  
+  401: Unauthorized  
+  500: Failed to generate AI response  
+RATE LIMIT: 20 requests per minute per user  
 
 ---
 
