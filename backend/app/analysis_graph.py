@@ -308,8 +308,8 @@ def extract_llm_facts_node(state: AnalysisState, config: Optional[RunnableConfig
                 completion_tokens = usage.get("completion_tokens", 0)
                 total_tokens = usage.get("total_tokens", 0)
 
-                # Cost: Input ($0.15/1M), Output ($0.60/1M)
-                cost = (prompt_tokens * 0.15 + completion_tokens * 0.60) / 1000000.0
+                # Cost: Input ($0.10/1M), Output ($0.40/1M) for gemini-3.1-flash-lite
+                cost = (prompt_tokens * 0.10 + completion_tokens * 0.40) / 1000000.0
 
                 content = resp_data["choices"][0]["message"]["content"]
                 parsed_result = json.loads(content)
