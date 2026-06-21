@@ -9,7 +9,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.redis_client import get_redis, redis_client
-from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus
+from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus, GeneratedOutput, OutputDownload, OutputType, DownloadFormat
 
 app = FastAPI(
     title="RepoProof API",
@@ -569,6 +569,324 @@ async def review_chat_interaction(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate AI response: {str(e)}"
         )
+
+
+# ==========================================
+# Phase 6: Document Compilation, Download, and Export
+# ==========================================
+import zipfile
+import io
+from datetime import datetime, timedelta, timezone
+
+class OutputRegenerateRequest(BaseModel):
+    ats_mode: Optional[str] = "experienced"
+    custom_instructions: Optional[str] = None
+
+@router.get("/repositories/{id}/outputs", tags=["outputs"])
+async def get_repository_outputs(
+    id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Lists metadata of all compiled outputs for the repository.
+    """
+    repo = db.query(Repository).filter(Repository.id == id).first()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found."
+        )
+
+    # Find latest analysis job
+    latest_job = db.query(AnalysisJob).filter(
+        AnalysisJob.repository_id == repo.id
+    ).order_by(AnalysisJob.created_at.desc()).first()
+
+    if not latest_job:
+        return []
+
+    # Get active generated outputs
+    outputs = db.query(GeneratedOutput).filter(
+        GeneratedOutput.analysis_job_id == latest_job.id,
+        GeneratedOutput.is_current_version == True
+    ).all()
+
+    return [
+        {
+            "id": str(out.id),
+            "analysis_job_id": str(out.analysis_job_id),
+            "output_type": out.output_type.value if hasattr(out.output_type, 'value') else out.output_type,
+            "content": out.content,
+            "version": out.version,
+            "minio_object_key": out.minio_object_key,
+            "llm_model_used": out.llm_model_used,
+            "created_at": out.created_at.isoformat(),
+            "updated_at": out.updated_at.isoformat()
+        }
+        for out in outputs
+    ]
+
+
+@router.get("/outputs/{id}", tags=["outputs"])
+async def get_output_by_id(
+    id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches the output metadata and content directly.
+    """
+    output = db.query(GeneratedOutput).filter(GeneratedOutput.id == id).first()
+    if not output:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Output not found."
+        )
+
+    return {
+        "id": str(output.id),
+        "analysis_job_id": str(output.analysis_job_id),
+        "output_type": output.output_type.value if hasattr(output.output_type, 'value') else output.output_type,
+        "content": output.content,
+        "version": output.version,
+        "minio_object_key": output.minio_object_key,
+        "llm_model_used": output.llm_model_used,
+        "created_at": output.created_at.isoformat(),
+        "updated_at": output.updated_at.isoformat()
+    }
+
+
+@router.get("/outputs/{id}/download", tags=["outputs"])
+async def download_output_file(
+    id: str,
+    format: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Generates a 15-minute presigned download link to the MinIO file and logs a row in OutputDownload for security audits.
+    """
+    output = db.query(GeneratedOutput).filter(GeneratedOutput.id == id).first()
+    if not output:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Output not found."
+        )
+
+    # Get job & user info
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == output.analysis_job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated analysis job not found."
+        )
+
+    # Determine object key based on output type and format
+    object_key = output.minio_object_key
+    dl_format = DownloadFormat.MD
+    
+    if output.output_type == OutputType.RESUME_BULLETS:
+        if format == "tex":
+            object_key = output.minio_object_key.replace(".pdf", ".tex")
+            dl_format = DownloadFormat.TXT
+        else:
+            dl_format = DownloadFormat.PDF
+    elif output.output_type == OutputType.LINKEDIN_DESC:
+        dl_format = DownloadFormat.MD
+    elif output.output_type == OutputType.README:
+        dl_format = DownloadFormat.MD
+    elif output.output_type == OutputType.PORTFOLIO_DOC:
+        dl_format = DownloadFormat.MD
+
+    # Generate presigned URL
+    from app.analysis_graph import get_s3_client
+    s3 = get_s3_client()
+    bucket_name = "repoproof-data"
+    
+    expires_in_seconds = 900 # 15 minutes
+    
+    try:
+        presigned_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': object_key},
+            ExpiresIn=expires_in_seconds
+        )
+    except Exception as s3_err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate download URL: {str(s3_err)}"
+        )
+
+    # Log the audit trail
+    expires_at = datetime.utcnow() + timedelta(seconds=expires_in_seconds)
+    audit = OutputDownload(
+        output_id=output.id,
+        user_id=job.user_id,
+        format=dl_format,
+        presigned_url_expires_at=expires_at
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "download_url": presigned_url,
+        "format": dl_format.value if hasattr(dl_format, 'value') else dl_format,
+        "expires_at": expires_at.isoformat()
+    }
+
+
+@router.post("/outputs/{id}/regenerate", tags=["outputs"])
+async def regenerate_output(
+    id: str,
+    payload: OutputRegenerateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Takes ats_mode and custom_instructions, calls the LLM, overwrites the MinIO file,
+    increments the version number, and updates the database record.
+    """
+    output = db.query(GeneratedOutput).filter(GeneratedOutput.id == id).first()
+    if not output:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Output not found."
+        )
+
+    from app.analysis_graph import regenerate_single_output
+    try:
+        updated_output = regenerate_single_output(
+            output_id=str(output.id),
+            ats_mode=payload.ats_mode,
+            custom_instructions=payload.custom_instructions
+        )
+        return {
+            "status": "success",
+            "message": "Output regenerated successfully.",
+            "output": {
+                "id": str(updated_output.id),
+                "output_type": updated_output.output_type.value if hasattr(updated_output.output_type, 'value') else updated_output.output_type,
+                "content": updated_output.content,
+                "version": updated_output.version,
+                "updated_at": updated_output.updated_at.isoformat()
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Regeneration failed: {str(e)}"
+        )
+
+
+@router.get("/repositories/{id}/outputs/export", tags=["outputs"])
+async def export_outputs_zip(
+    id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Bundles all outputs (PDF, Tex source, LinkedIn markdown, etc.) into a zip file,
+    stores it in MinIO, and returns a presigned link for the zip file.
+    """
+    repo = db.query(Repository).filter(Repository.id == id).first()
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found."
+        )
+
+    # Find latest analysis job
+    latest_job = db.query(AnalysisJob).filter(
+        AnalysisJob.repository_id == repo.id
+    ).order_by(AnalysisJob.created_at.desc()).first()
+
+    if not latest_job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No analysis job found for this repository."
+        )
+
+    # Get active generated outputs
+    outputs = db.query(GeneratedOutput).filter(
+        GeneratedOutput.analysis_job_id == latest_job.id,
+        GeneratedOutput.is_current_version == True
+    ).all()
+
+    if not outputs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No compiled outputs found for this repository's latest job."
+        )
+
+    from app.analysis_graph import get_s3_client
+    s3 = get_s3_client()
+    bucket_name = "repoproof-data"
+
+    # Create zip file in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+        for out in outputs:
+            # Map type to file name
+            if out.output_type == OutputType.RESUME_BULLETS:
+                # Add LaTeX code
+                zip_file.writestr("resume.tex", out.content)
+                # Try fetching PDF from MinIO
+                try:
+                    pdf_obj = s3.get_object(Bucket=bucket_name, Key=out.minio_object_key)
+                    pdf_bytes = pdf_obj["Body"].read()
+                    zip_file.writestr("resume.pdf", pdf_bytes)
+                except Exception as s3_err:
+                    logger.error(f"Failed to fetch PDF from MinIO for zip export: {s3_err}")
+            elif out.output_type == OutputType.LINKEDIN_DESC:
+                zip_file.writestr("linkedin.md", out.content)
+            elif out.output_type == OutputType.README:
+                zip_file.writestr("README.md", out.content)
+            elif out.output_type == OutputType.PORTFOLIO_DOC:
+                zip_file.writestr("portfolio.md", out.content)
+
+    # Seek buffer back to start
+    zip_buffer.seek(0)
+
+    # Upload zip to MinIO
+    zip_key = f"outputs/{latest_job.user_id}/{latest_job.id}/export.zip"
+    try:
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=zip_key,
+            Body=zip_buffer.getvalue(),
+            ContentType="application/zip"
+        )
+    except Exception as s3_err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload zip export to MinIO: {str(s3_err)}"
+        )
+
+    # Generate 15-minute presigned URL
+    expires_in_seconds = 900 # 15 minutes
+    try:
+        presigned_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': zip_key},
+            ExpiresIn=expires_in_seconds
+        )
+    except Exception as s3_err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate export download link: {str(s3_err)}"
+        )
+
+    # Log download of outputs
+    for out in outputs:
+        audit = OutputDownload(
+            output_id=out.id,
+            user_id=latest_job.user_id,
+            format=DownloadFormat.JSON,  # custom format code for zip export bundle
+            presigned_url_expires_at=datetime.utcnow() + timedelta(seconds=expires_in_seconds)
+        )
+        db.add(audit)
+    db.commit()
+
+    return {
+        "download_url": presigned_url,
+        "expires_at": (datetime.utcnow() + timedelta(seconds=expires_in_seconds)).isoformat()
+    }
 
 
 app.include_router(router)
