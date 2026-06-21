@@ -29,6 +29,18 @@ class JobStatus(str, enum.Enum):
     FAILED = "failed"
     TIMED_OUT = "timed_out"
 
+class OutputType(str, enum.Enum):
+    RESUME_BULLETS = "resume_bullets"
+    LINKEDIN_DESC = "linkedin_desc"
+    README = "readme"
+    PORTFOLIO_DOC = "portfolio_doc"
+
+class DownloadFormat(str, enum.Enum):
+    TXT = "txt"
+    MD = "md"
+    PDF = "pdf"
+    JSON = "json"
+
 # Models
 class User(Base):
     """
@@ -323,3 +335,173 @@ class AnalysisJob(Base):
     # Relationships
     repository: Mapped["Repository"] = relationship("Repository", back_populates="analysis_jobs")
     user: Mapped["User"] = relationship("User", back_populates="analysis_jobs")
+    generated_outputs: Mapped[List["GeneratedOutput"]] = relationship(
+        "GeneratedOutput",
+        back_populates="analysis_job",
+        cascade="all, delete-orphan"
+    )
+
+
+class GeneratedOutput(Base):
+    """
+    Generated resumes, readmes, and profiles derived from verified repository facts.
+    """
+    __tablename__ = "generated_outputs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key UUID."
+    )
+    analysis_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analysis_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="Job run that generated this text output. Cascade deletes on job removal."
+    )
+    output_type: Mapped[OutputType] = mapped_column(
+        Enum(OutputType, name="output_type_enum", values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        comment="Format target (e.g. resume bullet list, markdown readme)."
+    )
+    content: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        comment="The actual string text output generated."
+    )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="Incremental counter tracking revision counts of the outputs."
+    )
+    is_current_version: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        comment="Boolean flag indicating which version is active/visible."
+    )
+    llm_model_used: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        comment="LLM model descriptor used for tracing and cost tracking."
+    )
+    prompt_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="Tokens sent in input."
+    )
+    completion_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="Tokens generated in output."
+    )
+    generation_duration_ms: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="Time taken for the generation API call to complete."
+    )
+    minio_object_key: Mapped[str] = mapped_column(
+        String(1024),
+        nullable=False,
+        comment="Cloudflare R2 storage path for file retrieval."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        comment="Record creation timestamp."
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=datetime.utcnow,
+        comment="Record last update timestamp."
+    )
+
+    # Relationships
+    analysis_job: Mapped["AnalysisJob"] = relationship("AnalysisJob", back_populates="generated_outputs")
+    downloads: Mapped[List["OutputDownload"]] = relationship(
+        "OutputDownload",
+        back_populates="output",
+        cascade="all, delete-orphan"
+    )
+
+
+class OutputDownload(Base):
+    """
+    Access audit trail logging user download actions and presigned URL properties.
+    """
+    __tablename__ = "output_downloads"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key UUID."
+    )
+    output_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("generated_outputs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="Reference to the downloaded generated file record. Cascade deletes on output removal."
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="User requesting download. Cascade deletes download logs on user deletion."
+    )
+    format: Mapped[DownloadFormat] = mapped_column(
+        Enum(DownloadFormat, name="download_format_enum", values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        comment="Downloaded format (txt, md, pdf, or json)."
+    )
+    downloaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        comment="Exact access timestamp."
+    )
+    presigned_url_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Expiration timestamp for the presigned storage download URL."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        comment="Record creation timestamp."
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=datetime.utcnow,
+        comment="Record last update timestamp."
+    )
+
+    # Relationships
+    output: Mapped["GeneratedOutput"] = relationship("GeneratedOutput", back_populates="downloads")
+    user: Mapped["User"] = relationship("User")
