@@ -110,6 +110,16 @@ services:
         condition: service_healthy
     restart: always
 
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: repoproof-litellm
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: [ "--config", "/app/config.yaml" ]
+    restart: always
+
   flower:
     image: mher/flower:latest
     container_name: repoproof-flower
