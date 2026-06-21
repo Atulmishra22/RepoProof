@@ -54,7 +54,7 @@ export default function OutputsPage() {
     setLoading(true);
     try {
       // 1. Fetch repositories and find matching one to get the name
-      const repoRes = await fetch("http://127.0.0.1:8000/api/v1/repositories");
+      const repoRes = await fetch("http://localhost:8000/api/v1/repositories");
       if (repoRes.ok) {
         const repoData = await repoRes.json();
         const found = repoData.repositories?.find((r: Repository) => r.id === repoId);
@@ -64,7 +64,7 @@ export default function OutputsPage() {
       }
 
       // 2. Fetch outputs
-      const outputsRes = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/outputs`);
+      const outputsRes = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/outputs`);
       if (outputsRes.ok) {
         const outputsData = await outputsRes.json();
         setOutputs(outputsData || []);
@@ -84,7 +84,7 @@ export default function OutputsPage() {
 
   const fetchResumePdfUrl = async (outputId: string) => {
     try {
-      const urlRes = await fetch(`http://127.0.0.1:8000/api/v1/outputs/${outputId}/download?format=pdf`);
+      const urlRes = await fetch(`http://localhost:8000/api/v1/outputs/${outputId}/download?format=pdf`);
       if (urlRes.ok) {
         const data = await urlRes.json();
         setResumePdfUrl(data.download_url);
@@ -122,7 +122,7 @@ export default function OutputsPage() {
       if (format) {
         query = `?format=${format}`;
       }
-      const dlRes = await fetch(`http://127.0.0.1:8000/api/v1/outputs/${activeOutput.id}/download${query}`);
+      const dlRes = await fetch(`http://localhost:8000/api/v1/outputs/${activeOutput.id}/download${query}`);
       if (dlRes.ok) {
         const data = await dlRes.json();
         // Trigger browser download by clicking a link
@@ -146,7 +146,7 @@ export default function OutputsPage() {
   const handleDownloadAllZip = async () => {
     setDownloadingZip(true);
     try {
-      const zipRes = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/outputs/export`);
+      const zipRes = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/outputs/export`);
       if (zipRes.ok) {
         const data = await zipRes.json();
         const link = document.createElement("a");
@@ -173,7 +173,7 @@ export default function OutputsPage() {
     setRegenError(null);
 
     try {
-      const regenRes = await fetch(`http://127.0.0.1:8000/api/v1/outputs/${activeOutput.id}/regenerate`, {
+      const regenRes = await fetch(`http://localhost:8000/api/v1/outputs/${activeOutput.id}/regenerate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"

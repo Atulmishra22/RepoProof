@@ -107,6 +107,11 @@ class User(Base):
         nullable=True,
         comment="NextAuth profile image URL."
     )
+    password_hash: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Hashed password for developer credentials login."
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

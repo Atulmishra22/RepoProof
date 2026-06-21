@@ -70,7 +70,7 @@ export default function DashboardPage() {
     setAnalysisResult(null);
     setCopiedIndex(null);
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repo.id}/analysis-result`);
+      const response = await fetch(`http://localhost:8000/api/v1/repositories/${repo.id}/analysis-result`);
       if (response.ok) {
         const data = await response.json();
         setAnalysisResult(data);
@@ -95,7 +95,7 @@ export default function DashboardPage() {
     setLoading(true);
     setConnectionError(null);
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories?username=${username}`);
+      const response = await fetch(`http://localhost:8000/api/v1/repositories?username=${username}`);
       if (response.ok) {
         const data = await response.json();
         setRepositories(data.repositories || []);
@@ -117,7 +117,7 @@ export default function DashboardPage() {
 
   const handleAnalyze = async (repoId: string) => {
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/analyze`, {
+      const response = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/analyze`, {
         method: "POST",
       });
       if (response.ok) {
@@ -154,7 +154,7 @@ export default function DashboardPage() {
 
       for (const repo of analyzingRepos) {
         try {
-          const response = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repo.id}/analyze`, {
+          const response = await fetch(`http://localhost:8000/api/v1/repositories/${repo.id}/analyze`, {
             method: "POST",
           });
           if (response.ok) {
@@ -237,7 +237,7 @@ export default function DashboardPage() {
         activeRepoIds.map(async (repoId) => {
           const { jobId } = activeJobs[repoId];
           try {
-            const res = await fetch(`http://127.0.0.1:8000/api/v1/repositories/${repoId}/analysis/${jobId}`);
+            const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/analysis/${jobId}`);
             if (res.ok) {
               const data = await res.json();
               const status = data.status; // e.g. queued, running, complete, failed, interrupted
@@ -279,7 +279,7 @@ export default function DashboardPage() {
     setStatusMessage("Triggering ingestion background task...");
     setConnectionError(null);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/v1/users/ingest", {
+      const response = await fetch("http://localhost:8000/api/v1/users/ingest", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
