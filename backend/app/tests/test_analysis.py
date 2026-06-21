@@ -67,6 +67,9 @@ class TestAnalysisPipeline(unittest.TestCase):
             "local_path": "",
             "file_tree": {},
             "extracted_facts": [],
+            "suggested_questions": [],
+            "llm_tokens_used": 0,
+            "llm_cost_usd": 0.0,
             "status": "queued",
             "error": None
         }
@@ -83,15 +86,29 @@ class TestAnalysisPipeline(unittest.TestCase):
         self.assertEqual(final_state["status"], "complete")
         self.assertGreater(len(final_state["file_tree"]), 0)
         
+        # Check that facts and suggested questions exist
+        self.assertIn("extracted_facts", final_state)
+        self.assertIn("suggested_questions", final_state)
+        self.assertGreater(len(final_state["extracted_facts"]), 0)
+        
         # Check MinIO
         s3 = get_s3_client()
         bucket_name = "repoproof-data"
-        s3_key = f"repos/{self.repo.id}/file_tree.json"
         
-        response = s3.get_object(Bucket=bucket_name, Key=s3_key)
-        file_tree_content = json.loads(response["Body"].read().decode("utf-8"))
+        s3_key_tree = f"repos/{self.repo.id}/file_tree.json"
+        response_tree = s3.get_object(Bucket=bucket_name, Key=s3_key_tree)
+        file_tree_content = json.loads(response_tree["Body"].read().decode("utf-8"))
         self.assertEqual(len(file_tree_content), len(final_state["file_tree"]))
+        
+        s3_key_result = f"repos/{self.repo.id}/analysis_result.json"
+        response_result = s3.get_object(Bucket=bucket_name, Key=s3_key_result)
+        result_content = json.loads(response_result["Body"].read().decode("utf-8"))
+        
+        self.assertIn("facts", result_content)
+        self.assertIn("suggested_questions", result_content)
+        self.assertEqual(len(result_content["facts"]), len(final_state["extracted_facts"]))
         print("Integration test passed successfully!")
 
 if __name__ == "__main__":
     unittest.main()
+
