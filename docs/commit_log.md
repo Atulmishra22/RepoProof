@@ -141,7 +141,18 @@ This document tracks every commit made during the development of the **RepoProof
     *   Synced `frontend_architecture.md` route map and redirects to use dashboard-based routes (`/dashboard/review/[jobId]` and `/dashboard/outputs/[repoId]`).
     *   Synced `implementation_roadmap.md` with the finalized Phase 6 implementation details.
 
-
-
-
+### Commit 12: Phase 8A Security + UX Implementation
+*   **Hash**: `3115920`
+*   **Timestamp**: 2026-06-29 20:00:00 UTC+5:30
+*   **Message**: `feat: implement private repo data isolation, split API endpoints, verify_github_ownership guard, 3-level caching, onboarding UI, and change detection`
+*   **Description**:
+    *   Added `is_private` boolean field to `Repository` model and executed Alembic schema migration `a98385580fc5`.
+    *   Modified repository ingestion in `tasks.py` to read and store `is_private` flag and fixed data leak in shared cache query.
+    *   Implemented 3-level cache model: Level 1 Meta Cache (Redis), Level 2 Public Repos Cache (Redis), and Level 3 Private Repos (PostgreSQL only).
+    *   Added `verify_github_ownership` FastAPI Dependency in `main.py` guarding private repository retrieval.
+    *   Split endpoints into `GET /api/v1/repos/{username}/public` and `GET /api/v1/repos/{username}/private` to prevent cross-user data leakage.
+    *   Removed hardcoded username fallback `"Atulmishra22"` and integrated `onboarding_required: True` checks.
+    *   Implemented change detection in `/repositories/{id}/analyze` to compare `last_commit_at` and `last_analyzed_at`, bypassing analysis for unchanged repos unless `force` is set.
+    *   Built Onboarding Welcome UI card in frontend dashboard page (`page.tsx`) showing username inputs and OAuth connections if onboarding is required.
+    *   Added comprehensive integration tests in `test_security.py` validating correct 403 authorization rejections and public/private repo query isolation.
 

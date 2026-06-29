@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional, List
 from app.celery_app import celery_app
@@ -11,7 +12,7 @@ from app.redis_client import redis_client
 logger = logging.getLogger(__name__)
 
 @celery_app.task(name="app.tasks.ingest_user_profile_task")
-def ingest_user_profile_task(username: str):
+def ingest_user_profile_task(username: str, user_id: Optional[str] = None):
     """
     Background task to fetch user details, profile README, and public repositories from GitHub.
     Saves User/Repositories to PostgreSQL, and caches the parsed profile in Redis.
@@ -47,18 +48,57 @@ def ingest_user_profile_task(username: str):
         except Exception as e:
             logger.warning(f"Error fetching profile README for {username}: {e}")
 
-        # 3. Fetch list of public repositories
+        # 3. Fetch list of public repositories (use database-cached metadata if available to save API limits)
+        repos = []
         try:
-            repos = gh.list_repositories(username)
+            existing_repos = db.query(Repository).filter(
+                Repository.owner == username,
+                Repository.is_private == False
+            ).all()
+            if existing_repos:
+                logger.info(f"Re-using {len(existing_repos)} repository records found in database for owner: {username}")
+                seen_ids = set()
+                for r in existing_repos:
+                    if r.github_repo_id not in seen_ids:
+                        seen_ids.add(r.github_repo_id)
+                        repos.append({
+                            "id": r.github_repo_id,
+                            "name": r.name,
+                            "html_url": r.github_url,
+                            "default_branch": r.default_branch,
+                            "language": r.primary_language,
+                            "stargazers_count": r.star_count,
+                            "owner": {"login": r.owner},
+                            "languages_map": r.languages,
+                            "private": r.is_private
+                        })
+            else:
+                logger.info(f"No existing repositories in DB for owner {username}. Querying GitHub API.")
+                repos_raw = gh.list_repositories(username)
+                for repo_data in repos_raw:
+                    repos.append({
+                        "id": repo_data.get("id"),
+                        "name": repo_data.get("name", ""),
+                        "html_url": repo_data.get("html_url", ""),
+                        "default_branch": repo_data.get("default_branch", "main"),
+                        "language": repo_data.get("language"),
+                        "stargazers_count": repo_data.get("stargazers_count", 0),
+                        "owner": {"login": repo_data.get("owner", {}).get("login", "")},
+                        "languages_map": None,
+                        "private": repo_data.get("private", False)
+                    })
         except GitHubClientError as e:
             logger.error(f"Failed to fetch repositories for user {username}: {e}")
             return {"status": "error", "message": f"Failed to fetch repositories: {str(e)}"}
 
         # 4. Upsert User in database
-        user = db.query(User).filter(User.github_username == username).first()
-        if not user:
-            # Try to match by email as fallback
-            user = db.query(User).filter(User.email == email).first()
+        if user_id:
+            user = db.query(User).filter(User.id == uuid.UUID(user_id)).first()
+        else:
+            user = db.query(User).filter(User.github_username == username).first()
+            if not user:
+                # Try to match by email as fallback
+                user = db.query(User).filter(User.email == email).first()
             
         if not user:
             user = User(
@@ -76,7 +116,7 @@ def ingest_user_profile_task(username: str):
             user.updated_at = datetime.utcnow()
             db.flush()
 
-        # Save profile stats and README in Redis for easy retrieval by API
+        # Save profile stats and README in Redis for easy retrieval by API (TTL: 24h)
         profile_data = {
             "username": username,
             "name": name,
@@ -86,7 +126,7 @@ def ingest_user_profile_task(username: str):
             "github_id": github_id,
             "readme": readme_content
         }
-        redis_client.set(f"github_profile:{username}", json.dumps(profile_data))
+        redis_client.setex(f"github_profile:{username}", 86400, json.dumps(profile_data))
 
         # 5. Upsert repositories in database
         processed_repos_count = 0
@@ -98,16 +138,23 @@ def ingest_user_profile_task(username: str):
             default_branch = repo_data.get("default_branch", "main")
             primary_language = repo_data.get("language")
             star_count = repo_data.get("stargazers_count", 0)
+            is_private = repo_data.get("private", False)
 
-            # Fetch languages byte map
-            languages_map = {}
-            try:
-                languages_map = gh.get_repository_languages(repo_owner, repo_name)
-            except Exception as e:
-                logger.warning(f"Failed to fetch languages for repo {repo_owner}/{repo_name}: {e}")
+            # Check if we have languages cached or need to fetch
+            languages_map = repo_data.get("languages_map")
+            if languages_map is None:
+                languages_map = {}
+                try:
+                    languages_map = gh.get_repository_languages(repo_owner, repo_name)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch languages for repo {repo_owner}/{repo_name}: {e}")
 
-            # Check if repo exists
-            repo = db.query(Repository).filter(Repository.github_repo_id == repo_id).first()
+            # Check if repo exists for this user specifically
+            repo = db.query(Repository).filter(
+                Repository.user_id == user.id,
+                Repository.github_repo_id == repo_id
+            ).first()
+            
             if not repo:
                 repo = Repository(
                     user_id=user.id,
@@ -119,6 +166,7 @@ def ingest_user_profile_task(username: str):
                     primary_language=primary_language,
                     languages=languages_map,
                     star_count=star_count,
+                    is_private=is_private,
                     analysis_status="pending"
                 )
                 db.add(repo)
@@ -130,11 +178,53 @@ def ingest_user_profile_task(username: str):
                 repo.primary_language = primary_language
                 repo.languages = languages_map
                 repo.star_count = star_count
+                repo.is_private = is_private
                 repo.updated_at = datetime.utcnow()
             
             processed_repos_count += 1
         
         db.commit()
+
+        # LEVEL 1 — META cache (Redis, shared, safe)
+        public_db_repos = db.query(Repository).filter(
+            Repository.user_id == user.id,
+            Repository.is_private == False
+        ).all()
+        
+        has_public = len(public_db_repos) > 0
+        has_private = db.query(Repository).filter(
+            Repository.user_id == user.id,
+            Repository.is_private == True
+        ).count() > 0
+        
+        meta_data = {
+            "has_public": has_public,
+            "has_private": has_private,
+            "profile_cached": True
+        }
+        redis_client.setex(f"github_meta:{username}", 86400, json.dumps(meta_data))
+        
+        # LEVEL 2 — PUBLIC repos cache (Redis, shared, safe)
+        public_repos_cache_data = [
+            {
+                "id": str(r.id),
+                "github_url": r.github_url,
+                "github_repo_id": r.github_repo_id,
+                "owner": r.owner,
+                "name": r.name,
+                "default_branch": r.default_branch,
+                "primary_language": r.primary_language,
+                "languages": r.languages,
+                "star_count": r.star_count,
+                "analysis_status": r.analysis_status.value if hasattr(r.analysis_status, 'value') else r.analysis_status,
+                "last_analyzed_at": r.last_analyzed_at.isoformat() if r.last_analyzed_at else None,
+                "created_at": r.created_at.isoformat(),
+                "updated_at": r.updated_at.isoformat()
+            }
+            for r in public_db_repos
+        ]
+        redis_client.setex(f"github_public_repos:{username}", 86400, json.dumps(public_repos_cache_data))
+
         logger.info(f"Ingested {processed_repos_count} repositories for user: {username}")
         return {
             "status": "success",
