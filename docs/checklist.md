@@ -80,3 +80,19 @@ This checklist tracks the implementation progress of the platform. Items will be
 - [ ] Set up the hourly review expiration and daily data purge cron tasks.
 - [ ] Deploy backend worker nodes to Render, database to Supabase, and frontend to Vercel.
 - [ ] **First Milestone Test**: OAuth login, ingestion, and generation workflows function in production.
+
+---
+
+## [x] Phase 8A: Security + UX
+- [x] Add is_private column to Repository model + migration.
+- [x] Fix shared cache reuse query in tasks.py (filter private repos).
+- [x] Store is_private flag when ingesting repositories.
+- [x] Split repositories endpoint into public + private routes.
+- [x] Implement verify_github_ownership guard dependency.
+- [x] Implement smart 3-level cache architecture.
+- [x] Remove hardcoded "Atulmishra22" fallbacks.
+- [x] Return onboarding_required flag in GET /repositories response.
+- [x] Add onboarding screen overlay in frontend dashboard.
+- [x] Compare last_commit_at and last_analyzed_at to skip analysis of unchanged repositories.
+- [x] **First Milestone Test**: Mismatched users get 403 when querying private repos; correct users load private repos directly from DB, and unchanged repo analyses return a cached status.
+

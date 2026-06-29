@@ -222,6 +222,13 @@ class Repository(Base):
         server_default="0",
         comment="Popularity metric of the repo to weigh project complexity."
     )
+    is_private: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="True if GitHub marked this repo private. Private repos are never shared across users."
+    )
     last_commit_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

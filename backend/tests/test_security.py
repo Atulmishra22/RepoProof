@@ -289,3 +289,151 @@ def test_rate_limiting_free_and_pro(db):
     db.delete(repo)
     db.delete(free_user)
     db.commit()
+
+
+def test_public_and_private_repo_endpoints(db):
+    random_suffix = str(uuid.uuid4())[:8]
+    username_a = f"usera_{random_suffix}"
+    username_b = f"userb_{random_suffix}"
+    
+    # 1. Create User A (owner) and User B (other)
+    user_a = User(
+        id=uuid.uuid4(),
+        email=f"usera_{random_suffix}@repoproof.com",
+        github_username=username_a,
+        auth_provider="github",
+        is_active=True
+    )
+    user_b = User(
+        id=uuid.uuid4(),
+        email=f"userb_{random_suffix}@repoproof.com",
+        github_username=username_b,
+        auth_provider="github",
+        is_active=True
+    )
+    db.add_all([user_a, user_b])
+    db.commit()
+
+    # Create Account models linking both users
+    from app.models import Account
+    account_a = Account(
+        id=uuid.uuid4(),
+        user_id=user_a.id,
+        type="oauth",
+        provider="github",
+        provider_account_id=f"github-id-a-{random_suffix}",
+        access_token=f"token-a-{random_suffix}"
+    )
+    account_b = Account(
+        id=uuid.uuid4(),
+        user_id=user_b.id,
+        type="oauth",
+        provider="github",
+        provider_account_id=f"github-id-b-{random_suffix}",
+        access_token=f"token-b-{random_suffix}"
+    )
+    db.add_all([account_a, account_b])
+    db.commit()
+
+    # Create active sessions
+    session_token_a = f"token-session-a-{random_suffix}"
+    db_session_a = SessionModel(
+        id=uuid.uuid4(),
+        session_token=session_token_a,
+        user_id=user_a.id,
+        expires=datetime.utcnow() + timedelta(hours=2)
+    )
+    db.add(db_session_a)
+    db.commit()
+
+    # Create repos for User A (one public, one private)
+    repo_a_pub = Repository(
+        id=uuid.uuid4(),
+        user_id=user_a.id,
+        github_url=f"https://github.com/{username_a}/pub-repo",
+        github_repo_id=int(str(uuid.uuid4().fields[0])[:9]),
+        owner=username_a,
+        name="pub-repo",
+        default_branch="main",
+        star_count=5,
+        is_private=False,
+        analysis_status=AnalysisStatus.PENDING
+    )
+    repo_a_priv = Repository(
+        id=uuid.uuid4(),
+        user_id=user_a.id,
+        github_url=f"https://github.com/{username_a}/priv-repo",
+        github_repo_id=int(str(uuid.uuid4().fields[0])[:9]),
+        owner=username_a,
+        name="priv-repo",
+        default_branch="main",
+        star_count=5,
+        is_private=True,
+        analysis_status=AnalysisStatus.PENDING
+    )
+
+    # Create repos for User B (one public, one private)
+    repo_b_pub = Repository(
+        id=uuid.uuid4(),
+        user_id=user_b.id,
+        github_url=f"https://github.com/{username_b}/pub-repo",
+        github_repo_id=int(str(uuid.uuid4().fields[0])[:9]),
+        owner=username_b,
+        name="pub-repo",
+        default_branch="main",
+        star_count=5,
+        is_private=False,
+        analysis_status=AnalysisStatus.PENDING
+    )
+    repo_b_priv = Repository(
+        id=uuid.uuid4(),
+        user_id=user_b.id,
+        github_url=f"https://github.com/{username_b}/priv-repo",
+        github_repo_id=int(str(uuid.uuid4().fields[0])[:9]),
+        owner=username_b,
+        name="priv-repo",
+        default_branch="main",
+        star_count=5,
+        is_private=True,
+        analysis_status=AnalysisStatus.PENDING
+    )
+
+    db.add_all([repo_a_pub, repo_a_priv, repo_b_pub, repo_b_priv])
+    db.commit()
+
+    headers_a = {"Authorization": f"Bearer {session_token_a}"}
+
+    try:
+        # Test 1: User A requests public repos of User B -> Should return User B's public repo, but NOT private
+        resp = client.get(f"/api/v1/repos/{username_b}/public", headers=headers_a)
+        assert resp.status_code == 200
+        repos = resp.json()["repositories"]
+        assert len(repos) == 1
+        assert repos[0]["name"] == "pub-repo"
+        assert repos[0]["is_private"] is False
+
+        # Test 2: User A requests private repos of User B -> Should return 403 Forbidden
+        resp_priv = client.get(f"/api/v1/repos/{username_b}/private", headers=headers_a)
+        assert resp_priv.status_code == 403
+        assert "You are not the verified owner" in resp_priv.json()["detail"]
+
+        # Test 3: User A requests private repos of User A -> Should succeed and return User A's private repo
+        resp_own_priv = client.get(f"/api/v1/repos/{username_a}/private", headers=headers_a)
+        assert resp_own_priv.status_code == 200
+        repos_own = resp_own_priv.json()["repositories"]
+        assert len(repos_own) == 1
+        assert repos_own[0]["name"] == "priv-repo"
+        assert repos_own[0]["is_private"] is True
+        
+    finally:
+        # Cleanup
+        db.delete(db_session_a)
+        db.delete(repo_a_pub)
+        db.delete(repo_a_priv)
+        db.delete(repo_b_pub)
+        db.delete(repo_b_priv)
+        db.delete(account_a)
+        db.delete(account_b)
+        db.delete(user_a)
+        db.delete(user_b)
+        db.commit()

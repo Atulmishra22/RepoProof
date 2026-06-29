@@ -4,12 +4,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import text
 import redis
 import json
+import logging
 from pydantic import BaseModel
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 from app.database import get_db
 from app.redis_client import get_redis, redis_client
-from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus, GeneratedOutput, OutputDownload, OutputType, DownloadFormat, Session as SessionModel, UsageMetric, SubscriptionTier
+from app.models import User, Repository, AnalysisJob, JobStatus, AnalysisStatus, GeneratedOutput, OutputDownload, OutputType, DownloadFormat, Session as SessionModel, UsageMetric, SubscriptionTier, Account
 
 app = FastAPI(
     title="RepoProof API",
@@ -170,6 +173,32 @@ class RateLimiter:
 
         return user
 
+async def verify_github_ownership(
+    username: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> User:
+    if current_user.auth_provider != "github":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Private repos require GitHub OAuth login."
+        )
+    if current_user.github_username != username:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not the verified owner of this GitHub account."
+        )
+    account = db.query(Account).filter(
+        Account.user_id == current_user.id,
+        Account.provider == "github"
+    ).first()
+    if not account or not account.access_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GitHub OAuth token missing or expired. Please re-login."
+        )
+    return current_user
+
 @router.get("/health", tags=["health"])
 async def health_check(
     db: Session = Depends(get_db),
@@ -217,15 +246,16 @@ class UserIngestRequest(BaseModel):
 
 @router.post("/users/ingest", tags=["users"])
 async def ingest_user(
-    request: UserIngestRequest
+    request: UserIngestRequest,
+    current_user: User = Depends(get_current_user)
 ):
     """
     Triggers the background Celery task to ingest a user's GitHub profile and repositories.
     """
     from app.tasks import ingest_user_profile_task
     try:
-        # Trigger Celery task asynchronously
-        task = ingest_user_profile_task.delay(request.username)
+        # Trigger Celery task asynchronously, passing user_id to map repos to current_user
+        task = ingest_user_profile_task.delay(request.username, str(current_user.id))
         return {
             "status": "success",
             "message": f"Ingestion task started for user {request.username}",
@@ -240,26 +270,43 @@ async def ingest_user(
 
 @router.get("/repositories", tags=["repositories"])
 async def get_repositories(
-    username: str = "Atulmishra22",
-    db: Session = Depends(get_db)
+    username: Optional[str] = None,
+    db: Session = Depends(get_db),
+    redis_conn: redis.Redis = Depends(get_redis),
+    current_user: User = Depends(get_current_user)
 ):
     """
-    Fetches the list of repositories from the database for the given username.
-    Defaults to 'Atulmishra22'. Also returns cached user profile details from Redis if available.
+    Fetches the list of repositories from the database for the authenticated user.
     """
-    # Fetch user
-    user = db.query(User).filter(User.github_username == username).first()
-    if not user:
+    target_username = username or current_user.github_username
+    if not target_username:
         return {
             "repositories": [],
-            "profile": None
+            "profile": None,
+            "onboarding_required": True,
+            "message": "Connect your GitHub account or enter a GitHub username to get started."
         }
 
-    # Fetch repos
-    repos = db.query(Repository).filter(Repository.user_id == user.id).all()
+    is_owner = (current_user.github_username == target_username) and (current_user.auth_provider == "github")
+    
+    target_user = db.query(User).filter(User.github_username == target_username).first()
+    if not target_user:
+        return {
+            "repositories": [],
+            "profile": None,
+            "onboarding_required": True,
+            "message": f"GitHub user '{target_username}' has not been ingested yet."
+        }
 
-    # Fetch profile details cache from Redis
-    profile_cache = redis_client.get(f"github_profile:{username}")
+    if is_owner:
+        repos = db.query(Repository).filter(Repository.user_id == target_user.id).all()
+    else:
+        repos = db.query(Repository).filter(
+            Repository.user_id == target_user.id,
+            Repository.is_private == False
+        ).all()
+
+    profile_cache = redis_conn.get(f"github_profile:{target_username}")
     profile_data = None
     if profile_cache:
         try:
@@ -268,13 +315,12 @@ async def get_repositories(
             pass
 
     if not profile_data:
-        # Fallback profile details if cache is empty
         profile_data = {
-            "username": user.github_username,
-            "name": user.github_username,
-            "email": user.email,
+            "username": target_user.github_username,
+            "name": target_user.name or target_user.github_username,
+            "email": target_user.email,
             "bio": "",
-            "avatar_url": "",
+            "avatar_url": target_user.image or "",
             "github_id": None,
             "readme": None
         }
@@ -291,6 +337,7 @@ async def get_repositories(
                 "primary_language": r.primary_language,
                 "languages": r.languages,
                 "star_count": r.star_count,
+                "is_private": r.is_private,
                 "analysis_status": r.analysis_status.value if hasattr(r.analysis_status, 'value') else r.analysis_status,
                 "last_analyzed_at": r.last_analyzed_at.isoformat() if r.last_analyzed_at else None,
                 "latest_job_id": (
@@ -306,13 +353,206 @@ async def get_repositories(
             }
             for r in repos
         ],
-        "profile": profile_data
+        "profile": profile_data,
+        "onboarding_required": False
+    }
+
+
+@router.get("/repos/{username}/public", tags=["repositories"])
+async def get_public_repositories(
+    username: str,
+    db: Session = Depends(get_db),
+    redis_conn: redis.Redis = Depends(get_redis)
+):
+    """
+    Fetches public repositories for a given GitHub username.
+    First checks Level 2 Redis cache, falls back to database on cache miss.
+    """
+    meta_cache = redis_conn.get(f"github_meta:{username}")
+    has_public = True
+    if meta_cache:
+        try:
+            meta_data = json.loads(meta_cache)
+            has_public = meta_data.get("has_public", True)
+        except Exception:
+            pass
+            
+    if not has_public:
+        return {
+            "repositories": [],
+            "profile": None,
+            "onboarding_required": False
+        }
+
+    repos_cache = redis_conn.get(f"github_public_repos:{username}")
+    if repos_cache:
+        try:
+            cached_repos = json.loads(repos_cache)
+            profile_cache = redis_conn.get(f"github_profile:{username}")
+            profile_data = None
+            if profile_cache:
+                profile_data = json.loads(profile_cache)
+            return {
+                "repositories": cached_repos,
+                "profile": profile_data,
+                "onboarding_required": False
+            }
+        except Exception as e:
+            logger.error(f"Failed to read public repos cache for {username}: {e}")
+
+    user = db.query(User).filter(User.github_username == username).first()
+    if not user:
+        return {
+            "repositories": [],
+            "profile": None,
+            "onboarding_required": True,
+            "message": f"GitHub user '{username}' has not been ingested yet."
+        }
+
+    repos = db.query(Repository).filter(
+        Repository.user_id == user.id,
+        Repository.is_private == False
+    ).all()
+
+    profile_cache = redis_conn.get(f"github_profile:{username}")
+    profile_data = None
+    if profile_cache:
+        try:
+            profile_data = json.loads(profile_cache)
+        except Exception:
+            pass
+    if not profile_data:
+        profile_data = {
+            "username": user.github_username,
+            "name": user.name or user.github_username,
+            "email": user.email,
+            "bio": "",
+            "avatar_url": user.image or "",
+            "github_id": None,
+            "readme": None
+        }
+
+    repos_list = [
+        {
+            "id": str(r.id),
+            "github_url": r.github_url,
+            "github_repo_id": r.github_repo_id,
+            "owner": r.owner,
+            "name": r.name,
+            "default_branch": r.default_branch,
+            "primary_language": r.primary_language,
+            "languages": r.languages,
+            "star_count": r.star_count,
+            "is_private": r.is_private,
+            "analysis_status": r.analysis_status.value if hasattr(r.analysis_status, 'value') else r.analysis_status,
+            "last_analyzed_at": r.last_analyzed_at.isoformat() if r.last_analyzed_at else None,
+            "latest_job_id": (
+                lambda val: str(val) if val else None
+            )(
+                db.execute(
+                    text("SELECT id FROM analysis_jobs WHERE repository_id = :repo_id ORDER BY created_at DESC LIMIT 1"),
+                    {"repo_id": r.id}
+                ).scalar()
+            ),
+            "created_at": r.created_at.isoformat(),
+            "updated_at": r.updated_at.isoformat()
+        }
+        for r in repos
+    ]
+
+    try:
+        redis_conn.setex(f"github_public_repos:{username}", 86400, json.dumps(repos_list))
+        meta_data = {
+            "has_public": len(repos) > 0,
+            "has_private": db.query(Repository).filter(Repository.user_id == user.id, Repository.is_private == True).count() > 0,
+            "profile_cached": True
+        }
+        redis_conn.setex(f"github_meta:{username}", 86400, json.dumps(meta_data))
+    except Exception as e:
+        logger.error(f"Failed to cache public repos in Redis: {e}")
+
+    return {
+        "repositories": repos_list,
+        "profile": profile_data,
+        "onboarding_required": False
+    }
+
+
+@router.get("/repos/{username}/private", tags=["repositories"])
+async def get_private_repositories(
+    username: str,
+    db: Session = Depends(get_db),
+    redis_conn: redis.Redis = Depends(get_redis),
+    current_user: User = Depends(verify_github_ownership)
+):
+    """
+    Fetches private repositories for the authenticated owner.
+    Reads directly from PostgreSQL, NEVER Redis.
+    """
+    user = current_user
+
+    repos = db.query(Repository).filter(
+        Repository.user_id == user.id,
+        Repository.is_private == True
+    ).all()
+
+    profile_cache = redis_conn.get(f"github_profile:{username}")
+    profile_data = None
+    if profile_cache:
+        try:
+            profile_data = json.loads(profile_cache)
+        except Exception:
+            pass
+    if not profile_data:
+        profile_data = {
+            "username": user.github_username,
+            "name": user.name or user.github_username,
+            "email": user.email,
+            "bio": "",
+            "avatar_url": user.image or "",
+            "github_id": None,
+            "readme": None
+        }
+
+    repos_list = [
+        {
+            "id": str(r.id),
+            "github_url": r.github_url,
+            "github_repo_id": r.github_repo_id,
+            "owner": r.owner,
+            "name": r.name,
+            "default_branch": r.default_branch,
+            "primary_language": r.primary_language,
+            "languages": r.languages,
+            "star_count": r.star_count,
+            "is_private": r.is_private,
+            "analysis_status": r.analysis_status.value if hasattr(r.analysis_status, 'value') else r.analysis_status,
+            "last_analyzed_at": r.last_analyzed_at.isoformat() if r.last_analyzed_at else None,
+            "latest_job_id": (
+                lambda val: str(val) if val else None
+            )(
+                db.execute(
+                    text("SELECT id FROM analysis_jobs WHERE repository_id = :repo_id ORDER BY created_at DESC LIMIT 1"),
+                    {"repo_id": r.id}
+                ).scalar()
+            ),
+            "created_at": r.created_at.isoformat(),
+            "updated_at": r.updated_at.isoformat()
+        }
+        for r in repos
+    ]
+
+    return {
+        "repositories": repos_list,
+        "profile": profile_data,
+        "onboarding_required": False
     }
 
 
 @router.post("/repositories/{id}/analyze", tags=["analysis"])
 async def trigger_repository_analysis(
     id: str,
+    force: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(RateLimiter("/analyze"))
 ):
@@ -327,6 +567,26 @@ async def trigger_repository_analysis(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Repository not found."
         )
+
+    # Change detection check (skip if not forced and repo is unchanged)
+    if not force and repo.last_analyzed_at and repo.last_commit_at:
+        last_commit = repo.last_commit_at
+        last_analyzed = repo.last_analyzed_at
+        if last_commit.tzinfo is not None and last_analyzed.tzinfo is None:
+            last_analyzed = last_analyzed.replace(tzinfo=last_commit.tzinfo)
+        elif last_commit.tzinfo is None and last_analyzed.tzinfo is not None:
+            last_commit = last_commit.replace(tzinfo=last_analyzed.tzinfo)
+            
+        if last_commit <= last_analyzed:
+            latest_job_id = db.execute(
+                text("SELECT id FROM analysis_jobs WHERE repository_id = :repo_id ORDER BY created_at DESC LIMIT 1"),
+                {"repo_id": repo.id}
+            ).scalar()
+            return {
+                "status": "cached",
+                "message": "Repository unchanged since last analysis. Serving existing results.",
+                "job_id": str(latest_job_id) if latest_job_id else None
+            }
 
     # 2. Check if a job is already queued or active for this repo
     active_job = db.query(AnalysisJob).filter(
