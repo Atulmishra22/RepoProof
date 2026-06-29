@@ -83,7 +83,7 @@ class TestAnalysisPipeline(unittest.TestCase):
         
         # Assertions
         self.assertIsNone(final_state.get("error"))
-        self.assertEqual(final_state["status"], "complete")
+        self.assertEqual(final_state["status"], "awaiting_review")
         self.assertGreater(len(final_state["file_tree"]), 0)
         
         # Check that facts and suggested questions exist

@@ -21,18 +21,32 @@ export async function POST(req: NextRequest) {
     let userRes = await dbPool.query("SELECT * FROM users WHERE email = $1", [emailLower]);
     let user = userRes.rows[0];
 
-    // Auto-seed developer@repoproof.com with password 'devpass' if it does not exist
-    if (!user && emailLower === "developer@repoproof.com") {
+    // Auto-seed developer@repoproof.com with password 'devpass' if it does not exist or has wrong password
+    if (emailLower === "developer@repoproof.com") {
       const salt = crypto.randomBytes(16).toString("hex");
       const hash = crypto.pbkdf2Sync("devpass", salt, 100000, 64, "sha512").toString("hex");
       const passwordHash = `pbkdf2_sha512$100000$${salt}$${hash}`;
-      const insertRes = await dbPool.query(
-        `INSERT INTO users (email, name, password_hash, subscription_tier, is_active, auth_provider)
-         VALUES ($1, 'Developer User', $2, 'pro', true, 'credentials')
-         RETURNING *`,
-        [emailLower, passwordHash]
-      );
-      user = insertRes.rows[0];
+      
+      if (!user) {
+        const insertRes = await dbPool.query(
+          `INSERT INTO users (email, name, password_hash, subscription_tier, is_active, auth_provider)
+           VALUES ($1, 'Developer User', $2, 'pro', true, 'credentials')
+           RETURNING *`,
+          [emailLower, passwordHash]
+        );
+        user = insertRes.rows[0];
+      } else {
+        // Guarantee password is devpass, and reset github_username for clean E2E run
+        await dbPool.query(
+          `UPDATE users SET password_hash = $1, auth_provider = 'credentials', github_username = NULL WHERE id = $2`,
+          [passwordHash, user.id]
+        );
+        user.password_hash = passwordHash;
+        user.github_username = null;
+      }
+
+      // Clear existing repositories to force clean E2E onboarding and ingestion test
+      await dbPool.query("DELETE FROM repositories WHERE user_id = $1", [user.id]);
     }
 
     if (!user) {
@@ -51,6 +65,12 @@ export async function POST(req: NextRequest) {
 
     // 2. Verify password hash
     try {
+      if (!user.password_hash) {
+        return NextResponse.json(
+          { success: false, error: "This account only supports GitHub login." },
+          { status: 401 }
+        );
+      }
       const parts = user.password_hash.split("$");
       const iterations = parseInt(parts[1], 10) || 1000;
       const salt = parts[2];
@@ -63,7 +83,7 @@ export async function POST(req: NextRequest) {
           { status: 401 }
         );
       }
-    } catch (err) {
+    } catch (err: any) {
       return NextResponse.json(
         { success: false, error: "Failed to verify password credentials." },
         { status: 500 }

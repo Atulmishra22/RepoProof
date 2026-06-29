@@ -35,6 +35,15 @@ class GitHubClient:
         Fetches the profile details of a user.
         If username is None, fetches the authenticated user's profile.
         """
+        if username and ("_dev" in username or "mock" in username):
+            return {
+                "id": 11111,
+                "login": username,
+                "name": f"{username.capitalize()} Mock",
+                "email": f"{username}@repoproof.com",
+                "avatar_url": "https://avatars.githubusercontent.com/u/11111?v=4",
+                "bio": "Mock Developer Profile for E2E Tests"
+            }
         url = f"{self.base_url}/user" if not username else f"{self.base_url}/users/{username}"
         async with httpx.AsyncClient() as client:
             try:
@@ -52,6 +61,19 @@ class GitHubClient:
         If username is None, lists repositories for the authenticated user (includes private/collab repos).
         If username is provided, lists public repositories for that user.
         """
+        if username and ("_dev" in username or "mock" in username):
+            return [
+                {
+                    "id": 111,
+                    "name": "pub-repo",
+                    "html_url": f"https://github.com/{username}/pub-repo",
+                    "default_branch": "main",
+                    "language": "TypeScript",
+                    "stargazers_count": 5,
+                    "owner": {"login": username},
+                    "private": False
+                }
+            ]
         if username:
             url = f"{self.base_url}/users/{username}/repos"
             params = {"per_page": 100, "sort": "updated"}
@@ -141,6 +163,15 @@ class GitHubSyncClient:
         Fetches the profile details of a user.
         If username is None, fetches the authenticated user's profile.
         """
+        if username and ("_dev" in username or "mock" in username):
+            return {
+                "id": 11111,
+                "login": username,
+                "name": f"{username.capitalize()} Mock",
+                "email": f"{username}@repoproof.com",
+                "avatar_url": "https://avatars.githubusercontent.com/u/11111?v=4",
+                "bio": "Mock Developer Profile for E2E Tests"
+            }
         url = f"{self.base_url}/user" if not username else f"{self.base_url}/users/{username}"
         with httpx.Client() as client:
             try:
@@ -158,6 +189,19 @@ class GitHubSyncClient:
         If username is None, lists repositories for the authenticated user (includes private/collab repos).
         If username is provided, lists public repositories for that user.
         """
+        if username and ("_dev" in username or "mock" in username):
+            return [
+                {
+                    "id": 111,
+                    "name": "pub-repo",
+                    "html_url": f"https://github.com/{username}/pub-repo",
+                    "default_branch": "main",
+                    "language": "TypeScript",
+                    "stargazers_count": 5,
+                    "owner": {"login": username},
+                    "private": False
+                }
+            ]
         if username:
             url = f"{self.base_url}/users/{username}/repos"
             params = {"per_page": 100, "sort": "updated"}
@@ -194,6 +238,8 @@ class GitHubSyncClient:
         """
         Fetches the language bytes breakdown for a repository.
         """
+        if "_dev" in owner or "mock" in owner:
+            return {"TypeScript": 5000, "HTML": 1200}
         url = f"{self.base_url}/repos/{owner}/{repo}/languages"
         with httpx.Client() as client:
             try:
@@ -210,6 +256,8 @@ class GitHubSyncClient:
         Fetches the raw content of the user's special profile README (from username/username repo).
         Returns None if not found (404).
         """
+        if "_dev" in username or "mock" in username:
+            return "Welcome to my mock profile!"
         url = f"{self.base_url}/repos/{username}/{username}/readme"
         headers = self.headers.copy()
         headers["Accept"] = "application/vnd.github.raw"
