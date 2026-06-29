@@ -156,3 +156,15 @@ This document tracks every commit made during the development of the **RepoProof
     *   Built Onboarding Welcome UI card in frontend dashboard page (`page.tsx`) showing username inputs and OAuth connections if onboarding is required.
     *   Added comprehensive integration tests in `test_security.py` validating correct 403 authorization rejections and public/private repo query isolation.
 
+### Commit 13: E2E Playwright Testing and Mock Ingestion Pipeline
+*   **Hash**: `3d44ec7`
+*   **Timestamp**: 2026-06-29 22:30:00 UTC+5:30
+*   **Message**: `test: configure Playwright E2E testing framework, write dashboard authentication onboarding spec, mock GitHub Sync Client, and auto-seed database`
+*   **Description**:
+    *   Configured Playwright E2E framework on Windows host and added test runners to `package.json`.
+    *   Wrote `frontend/tests/e2e/dashboard.spec.ts` to perform end-to-end testing of developer login, profile linking, celery-driven ingestion, and dashboard grid rendering.
+    *   Updated `developer-login` API endpoint to reset `github_username` and delete repositories on every login, ensuring clean, repeatable E2E test runs.
+    *   Implemented mock response logic in `GitHubClient` and `GitHubSyncClient` inside `github_client.py` to return mock profiles and mock repositories for `_dev` usernames, allowing the ingestion task to succeed offline.
+    *   Added background WSL VM keep-alive scripts to resolve Hyper-V idle shutdown and maintain connection stability on port 5433.
+
+
