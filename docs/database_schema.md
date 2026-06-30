@@ -85,6 +85,7 @@ CREATE TABLE repositories (
     primary_language VARCHAR(50) NULL,
     languages JSONB NOT NULL DEFAULT '{}'::jsonb,
     star_count INTEGER NOT NULL DEFAULT 0,
+    is_private BOOLEAN NOT NULL DEFAULT FALSE,
     last_commit_at TIMESTAMP WITH TIME ZONE NULL,
     analysis_status analysis_status_enum NOT NULL DEFAULT 'pending',
     last_analyzed_at TIMESTAMP WITH TIME ZONE NULL,
@@ -106,6 +107,7 @@ COMMENT ON COLUMN repositories.default_branch IS 'Active default branch (e.g., m
 COMMENT ON COLUMN repositories.primary_language IS 'Primary language of the repo as detected by GitHub.';
 COMMENT ON COLUMN repositories.languages IS 'JSON map of all languages used and their byte count (from GitHub API).';
 COMMENT ON COLUMN repositories.star_count IS 'Popularity metric of the repo to weigh project complexity.';
+COMMENT ON COLUMN repositories.is_private IS 'Flag indicating if the repository is private.';
 COMMENT ON COLUMN repositories.last_commit_at IS 'Repository staleness indicator used to check if re-indexing is needed.';
 COMMENT ON COLUMN repositories.analysis_status IS 'Aggregated user-facing status representing the state of the active analysis.';
 COMMENT ON COLUMN repositories.last_analyzed_at IS 'Timestamp of the latest completed execution run.';
