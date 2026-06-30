@@ -105,6 +105,24 @@ This document serves as the runtime and compilation log for the project developm
 - **Diagnosis**: Two issues: (1) WSL2 auto-shut down after 60 seconds of inactivity because no active console shells kept it open. (2) `localhostForwarding` was not explicitly enabled in the global `.wslconfig` file, preventing the Windows host browser from reaching the container.
 - **Resolution**: Added `vmIdleTimeout=3600000` (1 hour in ms) and `localhostForwarding=true` under `[wsl2]` in `C:\Users\Asus\.wslconfig`. Ran `wsl --shutdown` to apply, and restarted WSL. Localhost connections now successfully forward to the backend.
 
+### 2026-06-29 15:45 - Event: Next.js Host Connection to WSL Database (ECONNREFUSED)
+- **Status**: Failed
+- **Context**: Connecting host Next.js dev server on port 3000 to PostgreSQL container running inside WSL on port 5433.
+- **Error Encountered**:
+  ```log
+  ConnectionRefusedError: connect ECONNREFUSED 127.0.0.1:5433
+  ```
+- **Diagnosis**: WSL2 VM automatically suspended its network port forwarding tables due to VM idle timeout policies, breaking access to the PostgreSQL port.
+- **Resolution**: Connected Next.js using the stable WSL bridge IP `172.29.242.56:5433` directly and launched a background WSL session task to keep the VM alive.
 
-
+### 2026-06-29 16:35 - Event: Pytest Legacy Unit Test Assertion (awaiting_review)
+- **Status**: Failed
+- **Context**: Running backend pytest test suite after Phase 5 Human-In-The-Loop integration.
+- **Error Encountered**:
+  ```log
+  AssertionError: 'awaiting_review' != 'complete'
+  FAILED app/tests/test_analysis.py::TestAnalysisPipeline::test_run_analysis_graph_directly
+  ```
+- **Diagnosis**: The legacy test `test_run_analysis_graph_directly` was written in Phase 3 assuming the graph would run to completion. In Phase 5, the human review interrupt was inserted, causing the graph to pause at `awaiting_review` instead of `complete`.
+- **Resolution**: Updated the status assertion in `backend/app/tests/test_analysis.py` to assert `awaiting_review` since the graph halts before review confirmation.
 
