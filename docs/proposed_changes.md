@@ -1,7 +1,7 @@
 # Proposed Changes — Principal Engineer Review
 **Date**: 2026-06-22
 **Source**: Architecture review session — covers security, caching, data isolation, AI pipeline, and production readiness.
-**Status**: All items below are PROPOSED but NOT yet implemented in code.
+**Status**: Phase 8A (Security + UX) and Phase 8B (RQS Scoring & Recommendations) are IMPLEMENTED.
 
 > [!IMPORTANT]
 > **Agent Startup Rule**: Before implementing ANY feature or fix, read this file top to bottom.
@@ -335,9 +335,9 @@ PHASE 8A — Security + UX (implement first):
   [x] Change 9:  Add onboarding screen in frontend dashboard
   [x] Change 10: Add change detection (last_commit_at check before analysis)
 
-PHASE 8B — Core Feature:
-  [ ] Change 11: Add impact_score to Repository model
-  [ ] Change 12: Multi-repo resume endpoint + merge_facts_node
+PHASE 8B — Core Feature (RQS Recommendation):
+  [x] Change 11: Add RQS score dynamically using async git tree walks + cache in Redis
+  [x] Change 12: Pre-checked repository grids, selection rules (max 3), and batch analysis
 
 PHASE 9 — Close Design Gap:
   [ ] Change 13: code_facts as proper DB table

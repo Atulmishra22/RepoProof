@@ -71,17 +71,37 @@ TRIGGERS: None
 
 ### GET /repositories
 ENDPOINT: GET /api/v1/repositories  
-DESCRIPTION: Returns a paginated list of repositories registered by the authenticated user.  
+DESCRIPTION: Returns a list of repositories registered for the target username (defaults to current user). Computes Repository Quality Scores (RQS) and tags recommended repositories.  
 AUTH: required  
 ASYNC: no  
 REQUEST:  
-  Query: `?page=integer&size=integer`  
+  Query: `?username=string`  
 RESPONSE (200):  
-  `{ "items": [ { "id": "UUID", "owner": "string", "name": "string", "primary_language": "string", "analysis_status": "string", "star_count": "integer", "last_analyzed_at": "string" } ], "total": "integer", "page": "integer", "size": "integer" }`  
+  `{ "repositories": [ { "id": "UUID", "github_url": "string", "github_repo_id": "integer", "owner": "string", "name": "string", "default_branch": "string", "primary_language": "string", "languages": "object", "star_count": "integer", "is_private": "boolean", "analysis_status": "string", "last_analyzed_at": "string", "latest_job_id": "string", "recommendation_score": "float", "recommended": "boolean", "created_at": "string", "updated_at": "string" } ], "profile": { "username": "string", "name": "string", "email": "string", "bio": "string", "avatar_url": "string" }, "onboarding_required": "boolean" }`  
 RESPONSE (errors):  
   401: Unauthorized  
 RATE LIMIT: 60 requests per minute per user  
 TRIGGERS: None  
+
+### GET /repos/{username}/public
+ENDPOINT: GET /api/v1/repos/{username}/public  
+DESCRIPTION: Fetches public repositories for a given GitHub username (caches to Redis level-2).  
+AUTH: required  
+ASYNC: no  
+REQUEST:  
+  Query: None  
+RESPONSE (200):  
+  `[ { "id": "UUID", "name": "string", "is_private": "boolean" } ]`  
+
+### GET /repos/{username}/private
+ENDPOINT: GET /api/v1/repos/{username}/private  
+DESCRIPTION: Fetches private repositories for the authenticated owner (uses PostgreSQL only).  
+AUTH: required (verify_github_ownership guard)  
+ASYNC: no  
+REQUEST:  
+  Query: None  
+RESPONSE (200):  
+  `[ { "id": "UUID", "name": "string", "is_private": "boolean" } ]`  
 
 ### GET /repositories/{id}
 ENDPOINT: GET /api/v1/repositories/{id}  
