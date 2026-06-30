@@ -121,6 +121,31 @@ class GitHubClient:
                 logger.error(f"HTTP error fetching languages for {owner}/{repo}: {e}")
                 raise GitHubClientError(f"HTTP error: {e}")
 
+    async def get_repository_git_tree(self, owner: str, repo: str, branch: str = "main") -> Dict[str, Any]:
+        """
+        Fetches the recursive Git tree of a repository.
+        """
+        if "_dev" in owner or "mock" in owner:
+            return {
+                "tree": [
+                    {"path": "package.json", "type": "blob", "size": 300},
+                    {"path": "src/index.ts", "type": "blob", "size": 1200},
+                    {"path": "src/index.test.ts", "type": "blob", "size": 450},
+                    {"path": "README.md", "type": "blob", "size": 800}
+                ]
+            }
+        url = f"{self.base_url}/repos/{owner}/{repo}/git/trees/{branch}"
+        params = {"recursive": "1"}
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(url, headers=self.headers, params=params, timeout=15.0)
+                if response.status_code != 200:
+                    raise GitHubAPIError(response.status_code, response.text)
+                return response.json()
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP error fetching git tree for {owner}/{repo}: {e}")
+                raise GitHubClientError(f"HTTP error: {e}")
+
     async def get_profile_readme(self, username: str) -> Optional[str]:
         """
         Fetches the raw content of the user's special profile README (from username/username repo).
@@ -249,6 +274,31 @@ class GitHubSyncClient:
                 return response.json()
             except httpx.HTTPError as e:
                 logger.error(f"HTTP error fetching languages for {owner}/{repo}: {e}")
+                raise GitHubClientError(f"HTTP error: {e}")
+
+    def get_repository_git_tree(self, owner: str, repo: str, branch: str = "main") -> Dict[str, Any]:
+        """
+        Fetches the recursive Git tree of a repository.
+        """
+        if "_dev" in owner or "mock" in owner:
+            return {
+                "tree": [
+                    {"path": "package.json", "type": "blob", "size": 300},
+                    {"path": "src/index.ts", "type": "blob", "size": 1200},
+                    {"path": "src/index.test.ts", "type": "blob", "size": 450},
+                    {"path": "README.md", "type": "blob", "size": 800}
+                ]
+            }
+        url = f"{self.base_url}/repos/{owner}/{repo}/git/trees/{branch}"
+        params = {"recursive": "1"}
+        with httpx.Client() as client:
+            try:
+                response = client.get(url, headers=self.headers, params=params, timeout=15.0)
+                if response.status_code != 200:
+                    raise GitHubAPIError(response.status_code, response.text)
+                return response.json()
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP error fetching git tree for {owner}/{repo}: {e}")
                 raise GitHubClientError(f"HTTP error: {e}")
 
     def get_profile_readme(self, username: str) -> Optional[str]:

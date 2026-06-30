@@ -44,6 +44,7 @@ export default function DashboardPage() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [onboardingRequired, setOnboardingRequired] = useState(false);
+  const [selectedRepoIds, setSelectedRepoIds] = useState<string[]>([]);
 
   useEffect(() => {
     async function fetchAuthProfile() {
@@ -134,8 +135,13 @@ export default function DashboardPage() {
           setProfile(null);
         } else {
           setOnboardingRequired(false);
-          setRepositories(data.repositories || []);
+          const repos = data.repositories || [];
+          setRepositories(repos);
           setProfile(data.profile || null);
+          const recommendedIds = repos
+            .filter((r: any) => r.recommended)
+            .map((r: any) => r.id);
+          setSelectedRepoIds(recommendedIds);
         }
       } else {
         setConnectionError(`Backend responded with status ${response.status}. Please check backend logs.`);
@@ -153,6 +159,20 @@ export default function DashboardPage() {
       fetchUserData(currentUsername);
     }
   }, [currentUsername]);
+
+  const toggleRepoSelection = (repoId: string) => {
+    setSelectedRepoIds((prev) => {
+      if (prev.includes(repoId)) {
+        return prev.filter((id) => id !== repoId);
+      } else {
+        if (prev.length >= 3) {
+          alert("You can select a maximum of 3 repositories to analyze and include in your resume.");
+          return prev;
+        }
+        return [...prev, repoId];
+      }
+    });
+  };
 
   const handleAnalyze = async (repoId: string) => {
     try {
@@ -841,13 +861,35 @@ export default function DashboardPage() {
 
           {/* Right Column: Repositories List Grid */}
           <div className="lg:col-span-2 space-y-6">
-            <div className="flex items-center justify-between border-b border-zinc-900 pb-4">
-              <h2 className="text-lg font-bold tracking-tight text-zinc-200">
-                Discovered Repositories
-              </h2>
-              <span className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-300 border border-zinc-800">
-                {repositories.length} public projects
-              </span>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-zinc-900 pb-4 gap-3">
+              <div>
+                <h2 className="text-lg font-bold tracking-tight text-zinc-200">
+                  Discovered Repositories
+                </h2>
+                <p className="text-[10px] text-zinc-500 mt-0.5">Select up to 3 projects to analyze for resume generation</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-300 border border-zinc-800">
+                  {repositories.length} public projects
+                </span>
+                {selectedRepoIds.length > 0 && (
+                  <button
+                    onClick={async () => {
+                      setStatusMessage(`Triggering batch analysis for ${selectedRepoIds.length} repositories...`);
+                      for (const id of selectedRepoIds) {
+                        const targetRepo = repositories.find(r => r.id === id);
+                        if (targetRepo && targetRepo.analysis_status !== "analyzing") {
+                          await handleAnalyze(id);
+                        }
+                      }
+                      setStatusMessage("");
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold transition-all shadow-[0_0_10px_rgba(37,99,235,0.2)]"
+                  >
+                    Analyze Selected ({selectedRepoIds.length}/3)
+                  </button>
+                )}
+              </div>
             </div>
 
             {loading ? (
@@ -882,36 +924,56 @@ export default function DashboardPage() {
                   <div key={repo.id} className="group relative rounded-xl border border-zinc-900 bg-zinc-900/30 p-5 shadow-md hover:border-zinc-800 hover:bg-zinc-900/50 hover:shadow-lg hover:shadow-blue-950/5 transition-all duration-300 flex flex-col justify-between">
                     <div>
                       <div className="flex items-start justify-between gap-3">
-                        <div className="space-y-1">
-                          <h3 className="font-semibold text-zinc-100 group-hover:text-blue-400 transition-colors">
-                            <a href={repo.github_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 break-all text-sm leading-snug">
-                              {repo.name}
-                              <svg className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 text-blue-400 transition-all transform translate-x-[-4px] group-hover:translate-x-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                              </svg>
-                            </a>
-                          </h3>
-                          <p className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider">Default branch: {repo.default_branch}</p>
+                        <div className="flex items-start gap-2.5">
+                          <input
+                            type="checkbox"
+                            checked={selectedRepoIds.includes(repo.id)}
+                            onChange={() => toggleRepoSelection(repo.id)}
+                            className="mt-1 h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-950 text-blue-600 focus:ring-blue-500 focus:ring-offset-zinc-950 cursor-pointer"
+                          />
+                          <div className="space-y-1">
+                            <h3 className="font-semibold text-zinc-100 group-hover:text-blue-400 transition-colors">
+                              <a href={repo.github_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 break-all text-sm leading-snug">
+                                {repo.name}
+                                <svg className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 text-blue-400 transition-all transform translate-x-[-4px] group-hover:translate-x-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                </svg>
+                              </a>
+                            </h3>
+                            <div className="flex items-center gap-2">
+                              <p className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider">Default branch: {repo.default_branch}</p>
+                              {repo.recommendation_score !== undefined && (
+                                <span className="text-[9px] text-zinc-400 bg-zinc-900 border border-zinc-850 px-1.5 py-0.5 rounded font-mono">
+                                  RQS: {repo.recommendation_score}
+                                </span>
+                              )}
+                            </div>
+                          </div>
                         </div>
-
-                        {/* Status Badge */}
-                        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
-                          repo.analysis_status === "complete" 
-                            ? "bg-green-950/20 text-green-400 border-green-900/40"
-                            : repo.analysis_status === "awaiting_review"
-                            ? "bg-amber-950/20 text-amber-400 border-amber-900/40"
-                            : repo.analysis_status === "failed"
-                            ? "bg-red-950/20 text-red-400 border-red-900/40"
-                            : repo.analysis_status === "analyzing"
-                            ? "bg-blue-950/20 text-blue-400 border-blue-900/40 animate-pulse"
-                            : "bg-zinc-950/20 text-zinc-400 border-zinc-800"
-                        }`}>
-                          {repo.analysis_status === "analyzing" && activeJobs[repo.id]?.currentNode
-                            ? `analyzing (${activeJobs[repo.id].currentNode})`
-                            : repo.analysis_status === "awaiting_review"
-                            ? "awaiting review"
-                            : repo.analysis_status}
-                        </span>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {repo.recommended && (
+                            <span className="inline-flex items-center gap-1 rounded bg-blue-950/40 text-blue-400 border border-blue-900/50 px-2 py-0.5 text-[8px] font-bold uppercase tracking-wider">
+                              ★ Recommended
+                            </span>
+                          )}
+                          <span className={`inline-flex rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+                            repo.analysis_status === "complete" 
+                              ? "bg-green-950/20 text-green-400 border-green-900/40"
+                              : repo.analysis_status === "awaiting_review"
+                              ? "bg-amber-950/20 text-amber-400 border-amber-900/40"
+                              : repo.analysis_status === "failed"
+                              ? "bg-red-950/20 text-red-400 border-red-900/40"
+                              : repo.analysis_status === "analyzing"
+                              ? "bg-blue-950/20 text-blue-400 border-blue-900/40 animate-pulse"
+                              : "bg-zinc-950/20 text-zinc-400 border-zinc-800"
+                          }`}>
+                            {repo.analysis_status === "analyzing" && activeJobs[repo.id]?.currentNode
+                              ? `analyzing (${activeJobs[repo.id].currentNode})`
+                              : repo.analysis_status === "awaiting_review"
+                              ? "awaiting review"
+                              : repo.analysis_status}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Language bar breakdown */}
