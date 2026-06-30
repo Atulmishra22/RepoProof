@@ -1,6 +1,6 @@
 import os
 import shutil
-import logging
+import structlog
 import time
 import subprocess
 import tempfile
@@ -12,14 +12,70 @@ from datetime import datetime
 import httpx
 from langfuse import Langfuse, propagate_attributes
 
+import uuid
 from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 from app.database import SessionLocal
-from app.models import Repository, AnalysisJob, AnalysisStatus, JobStatus, GeneratedOutput, OutputType
+from app.models import Repository, AnalysisJob, AnalysisStatus, JobStatus, GeneratedOutput, OutputType, CodeFact
 from app.checkpointer import get_checkpointer
 from app.llm_schemas import FactExtractionResult, LaTeXResumeResponse, LaTeXSelfHealingResponse, MarkdownOutputsResponse, SingleMarkdownResponse
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
+
+
+def save_facts_to_db(job_id: uuid.UUID, facts: List[Dict[str, Any]]):
+    db = SessionLocal()
+    try:
+        # Check existing facts for this job_id
+        existing_facts = db.query(CodeFact).filter(CodeFact.analysis_job_id == job_id).all()
+        existing_by_id = {str(ef.id): ef for ef in existing_facts}
+        
+        passed_ids = set()
+        for f in facts:
+            fid = f.get("id")
+            if not fid:
+                fid = str(uuid.uuid4())
+                f["id"] = fid
+            passed_ids.add(fid)
+            
+            if fid in existing_by_id:
+                # Update existing fact
+                fact_obj = existing_by_id[fid]
+                fact_obj.category = f.get("category")
+                fact_obj.claim = f.get("claim")
+                fact_obj.source_file = f.get("source_file")
+                fact_obj.snippet = f.get("snippet")
+                fact_obj.ats_impact = f.get("ats_impact")
+                if "is_validated" in f:
+                    fact_obj.is_validated = bool(f["is_validated"])
+                if "is_human_approved" in f:
+                    fact_obj.is_human_approved = bool(f["is_human_approved"])
+            else:
+                # Create new fact
+                fact_obj = CodeFact(
+                    id=uuid.UUID(fid),
+                    analysis_job_id=job_id,
+                    category=f.get("category"),
+                    claim=f.get("claim"),
+                    source_file=f.get("source_file"),
+                    snippet=f.get("snippet"),
+                    ats_impact=f.get("ats_impact"),
+                    is_validated=f.get("is_validated", False),
+                    is_human_approved=f.get("is_human_approved", False)
+                )
+                db.add(fact_obj)
+        
+        # Delete any existing facts not passed in the list
+        for fid, fact_obj in existing_by_id.items():
+            if fid not in passed_ids:
+                db.delete(fact_obj)
+                
+        db.commit()
+    except Exception as e:
+        logger.error(f"Failed to save facts to DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 LITELLM_PROXY_URL = os.environ.get("LITELLM_PROXY_URL", "http://litellm:4000")
 MODEL_NAME = "gpt-4o-mini"
@@ -44,6 +100,8 @@ class AnalysisState(TypedDict):
     llm_cost_usd: float
     status: str
     error: Optional[str]
+    target_role: Optional[str]
+    needs_clarification: Optional[bool]
 
 # MinIO storage helper
 def get_s3_client():
@@ -54,25 +112,113 @@ def get_s3_client():
         aws_secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY", "minioadminpass"),
     )
 
-def read_key_files(local_path: str, file_tree: Dict[str, Any], max_chars: int = 12000) -> Dict[str, str]:
-    key_files_content = {}
+def build_dependency_graph(local_path: str, file_tree: Dict[str, Any]) -> Dict[str, List[str]]:
+    graph = {}
+    import re
+    
+    # regexes to extract import targets
+    py_import_re = re.compile(r'^\s*(?:import|from)\s+([a-zA-Z0-9_\.]+)')
+    js_import_re = re.compile(r'(?:import|require)\s*\(\s*[\'"]([^\'"]+)[\'"]')
+    js_from_re = re.compile(r'from\s+[\'"]([^\'"]+)[\'"]')
+    
+    for rel_path in file_tree.keys():
+        abs_path = os.path.join(local_path, rel_path)
+        if not os.path.isfile(abs_path):
+            continue
+            
+        graph[rel_path] = []
+        filename_lower = os.path.basename(rel_path).lower()
+        
+        # Only parse source code files
+        if not any(filename_lower.endswith(ext) for ext in [".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs"]):
+            continue
+            
+        try:
+            with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    # python
+                    if filename_lower.endswith(".py"):
+                        match = py_import_re.match(line)
+                        if match:
+                            module = match.group(1).split('.')[0]
+                            for k in file_tree.keys():
+                                if k.startswith(module) or f"/{module}" in k:
+                                    graph[rel_path].append(k)
+                    # js/ts
+                    elif any(filename_lower.endswith(ext) for ext in [".js", ".ts", ".jsx", ".tsx"]):
+                        match = js_import_re.search(line)
+                        if match:
+                            dep = match.group(1)
+                            for k in file_tree.keys():
+                                if dep in k:
+                                    graph[rel_path].append(k)
+                        match2 = js_from_re.search(line)
+                        if match2:
+                            dep = match2.group(1)
+                            for k in file_tree.keys():
+                                if dep in k:
+                                    graph[rel_path].append(k)
+        except Exception as e:
+            logger.warning(f"Error parsing dependencies for {rel_path}: {e}")
+            
+    # Clean duplicates
+    for k in graph:
+        graph[k] = list(set(graph[k]))
+        
+    return graph
+
+def prune_context_files(local_path: str, file_tree: Dict[str, Any], max_chars: int = 12000) -> Dict[str, str]:
+    logger.info("Running GraphRAG context pruning...")
+    graph = build_dependency_graph(local_path, file_tree)
+    
+    # Save dependency graph to project_graph.json
+    try:
+        graph_path = os.path.join(local_path, "project_graph.json")
+        with open(graph_path, 'w', encoding='utf-8') as f:
+            json.dump(graph, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save project_graph.json: {e}")
+        
+    # Identify seed entry points
     target_names = {
         "package.json", "pyproject.toml", "requirements.txt",
         "dockerfile", "docker-compose.yml", "go.mod", "cargo.toml",
         "main.py", "app.py", "index.js", "server.js", "src/main.ts"
     }
+    
+    seeds = []
     for rel_path in file_tree.keys():
         filename = os.path.basename(rel_path).lower()
         if filename in target_names or rel_path.lower() in target_names:
-            abs_path = os.path.join(local_path, rel_path)
-            if os.path.isfile(abs_path):
-                try:
-                    with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read(max_chars)
-                        key_files_content[rel_path] = content
-                except Exception as e:
-                    logger.warning(f"Failed to read file {rel_path}: {e}")
-    return key_files_content
+            seeds.append(rel_path)
+            
+    # BFS to collect reachable files up to depth 2
+    visited = set(seeds)
+    queue = [(s, 0) for s in seeds]
+    
+    while queue:
+        curr, depth = queue.pop(0)
+        if depth >= 2:
+            continue
+        neighbors = graph.get(curr, [])
+        for n in neighbors:
+            if n not in visited:
+                visited.add(n)
+                queue.append((n, depth + 1))
+                
+    # Read the contents of visited/pruned files
+    pruned_content = {}
+    for rel_path in visited:
+        abs_path = os.path.join(local_path, rel_path)
+        if os.path.isfile(abs_path):
+            try:
+                with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    pruned_content[rel_path] = f.read(max_chars)
+            except Exception as e:
+                logger.warning(f"Failed to read file {rel_path} in GraphRAG context: {e}")
+                
+    logger.info(f"GraphRAG pruned context to {len(pruned_content)} files out of {len(file_tree)} total files.")
+    return pruned_content
 
 def clone_repo_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     repo_id = state["repository_id"]
@@ -213,6 +359,8 @@ def extract_heuristic_facts_node(state: AnalysisState, config: Optional[Runnable
             "ats_impact": "Indicates repository scale and dominant programming language context."
         })
         
+    for f in facts:
+        f["id"] = str(uuid.uuid4())
     logger.info(f"Extracted {len(facts)} heuristic facts.")
     return {
         "extracted_facts": facts,
@@ -243,8 +391,8 @@ def extract_llm_facts_node(state: AnalysisState, config: Optional[RunnableConfig
     local_path = state.get("local_path")
     file_tree = state.get("file_tree", {})
 
-    # Select key files
-    key_files = read_key_files(local_path, file_tree)
+    # Select key files using GraphRAG pruned retrieval
+    key_files = prune_context_files(local_path, file_tree)
     key_files_str = ""
     for path, content in key_files.items():
         key_files_str += f"--- FILE: {path} ---\n{content}\n\n"
@@ -311,6 +459,15 @@ def extract_llm_facts_node(state: AnalysisState, config: Optional[RunnableConfig
                 completion_tokens = usage.get("completion_tokens", 0)
                 total_tokens = usage.get("total_tokens", 0)
 
+                try:
+                    from app.metrics import llm_api_call_total, llm_token_consumption_total
+                    llm_api_call_total.labels(provider="gemini", model=MODEL_NAME, status="success").inc()
+                    # We can use the repository_id as user identifier proxy or log it for general tracking
+                    llm_token_consumption_total.labels(user_id=state.get("repository_id", "system"), model=MODEL_NAME, type="prompt").inc(prompt_tokens)
+                    llm_token_consumption_total.labels(user_id=state.get("repository_id", "system"), model=MODEL_NAME, type="completion").inc(completion_tokens)
+                except Exception as metric_err:
+                    logger.error(f"Failed to record LLM success metrics: {metric_err}")
+
                 # Cost: Input ($0.10/1M), Output ($0.40/1M) for gemini-3.1-flash-lite
                 cost = (prompt_tokens * 0.10 + completion_tokens * 0.40) / 1000000.0
 
@@ -329,9 +486,18 @@ def extract_llm_facts_node(state: AnalysisState, config: Optional[RunnableConfig
                     }
                 )
 
+                for f in extracted_facts:
+                    f["id"] = str(uuid.uuid4())
+
                 # Combine heuristic facts and LLM facts
                 existing_facts = state.get("extracted_facts", [])
                 combined_facts = list(existing_facts) + extracted_facts
+
+                if job_id:
+                    try:
+                        save_facts_to_db(uuid.UUID(str(job_id)), combined_facts)
+                    except Exception as db_err:
+                        logger.error(f"Failed to save combined facts to database: {db_err}")
 
                 return {
                     "extracted_facts": combined_facts,
@@ -341,6 +507,12 @@ def extract_llm_facts_node(state: AnalysisState, config: Optional[RunnableConfig
                     "status": "llm_facts_extracted"
                 }
     except Exception as e:
+        try:
+            from app.metrics import llm_api_call_total
+            llm_api_call_total.labels(provider="gemini", model=MODEL_NAME, status="failure").inc()
+        except Exception as metric_err:
+            logger.error(f"Failed to record LLM failure metrics: {metric_err}")
+            
         logger.exception(f"Error in LLM fact extraction: {e}")
         return {
             "status": "failed",
@@ -414,6 +586,18 @@ def validate_facts_node(state: AnalysisState, config: Optional[RunnableConfig] =
         except Exception as e:
             logger.error(f"Failed to validate snippet for {source_file}: {e}")
             
+    validated_ids = {f.get("id") for f in validated_facts if f.get("id")}
+    for f in extracted_facts:
+        f["is_validated"] = f.get("id") in validated_ids
+
+    if config:
+        job_id = config.get("configurable", {}).get("thread_id")
+        if job_id:
+            try:
+                save_facts_to_db(uuid.UUID(str(job_id)), extracted_facts)
+            except Exception as db_err:
+                logger.error(f"Failed to update validated facts in database: {db_err}")
+
     logger.info(f"Validated facts: {len(validated_facts)} out of {len(extracted_facts)} remaining.")
     return {
         "extracted_facts": validated_facts,
@@ -634,6 +818,70 @@ def await_human_review_node(state: AnalysisState, config: Optional[RunnableConfi
     logger.info("Resuming execution from human review checkpoint...")
     return {"status": "review_completed"}
 
+
+def check_missing_context_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    if state.get("error"):
+        return {}
+        
+    repo_id = state["repository_id"]
+    job_id = None
+    if config:
+        job_id = config.get("configurable", {}).get("thread_id")
+        
+    db = SessionLocal()
+    user_email = ""
+    target_role = state.get("target_role")
+    
+    # Query user details
+    try:
+        repo = db.query(Repository).filter(Repository.id == repo_id).first()
+        if repo:
+            from app.models import User
+            user = db.query(User).filter(User.id == repo.user_id).first()
+            if user:
+                user_email = user.email or ""
+    except Exception as e:
+        logger.error(f"Error checking context details: {e}")
+    finally:
+        db.close()
+        
+    # Validation check: must have a valid email and target role
+    has_email = bool(user_email and "@" in user_email)
+    has_role = bool(target_role and target_role.strip())
+    
+    if not has_email or not has_role:
+        logger.warning(f"Clarification Gate failed. Has email: {has_email}, Has role: {has_role}. Pausing workflow.")
+        # Update job status in database to AWAITING_CLARIFICATION
+        if job_id:
+            db = SessionLocal()
+            try:
+                db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
+                    "status": JobStatus.INTERRUPTED,
+                    "current_node": "await_clarification",
+                    "updated_at": datetime.utcnow()
+                })
+                db.commit()
+            except Exception as db_err:
+                logger.error(f"Failed to update job to awaiting clarification: {db_err}")
+            finally:
+                db.close()
+                
+        return {
+            "needs_clarification": True,
+            "status": "awaiting_clarification"
+        }
+        
+    logger.info("Clarification Gate passed. Continuing to document compilation.")
+    return {
+        "needs_clarification": False,
+        "status": "clarification_passed"
+    }
+
+
+def await_clarification_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    logger.info("Resuming execution from clarification gate...")
+    return {"status": "clarification_provided"}
+
 def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     if state.get("error"):
         return {}
@@ -700,6 +948,11 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
 
     # Helper for LLM Calls
     def call_llm(messages: List[Dict[str, str]], schema: Any) -> Dict[str, Any]:
+        from app.logging_config import bind_log_context
+        if job_id:
+            bind_log_context(job_id=str(job_id))
+        bind_log_context(user_id=user_id_str)
+        
         with propagate_attributes(user_id=repo_id, session_id=str(job_id) if job_id else None):
             with langfuse.start_as_current_observation(
                 as_type="generation",
@@ -708,29 +961,45 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
                 input=messages,
                 model_parameters={"temperature": 0.2}
             ) as generation:
-                response = httpx.post(
-                    f"{LITELLM_PROXY_URL}/v1/chat/completions",
-                    json={
-                        "model": MODEL_NAME,
-                        "messages": messages,
-                        "temperature": 0.2,
-                        "response_format": {
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": schema.__name__,
-                                "schema": schema.model_json_schema(),
-                                "strict": True
+                try:
+                    response = httpx.post(
+                        f"{LITELLM_PROXY_URL}/v1/chat/completions",
+                        json={
+                            "model": MODEL_NAME,
+                            "messages": messages,
+                            "temperature": 0.2,
+                            "response_format": {
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": schema.__name__,
+                                    "schema": schema.model_json_schema(),
+                                    "strict": True
+                                }
                             }
-                        }
-                    },
-                    timeout=120.0
-                )
-                response.raise_for_status()
-                resp_data = response.json()
+                        },
+                        timeout=120.0
+                    )
+                    response.raise_for_status()
+                    resp_data = response.json()
+                except Exception as call_err:
+                    try:
+                        from app.metrics import llm_api_call_total
+                        llm_api_call_total.labels(provider="gemini", model=MODEL_NAME, status="failure").inc()
+                    except Exception:
+                        pass
+                    raise call_err
                 
                 usage = resp_data.get("usage", {})
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
+                
+                try:
+                    from app.metrics import llm_api_call_total, llm_token_consumption_total
+                    llm_api_call_total.labels(provider="gemini", model=MODEL_NAME, status="success").inc()
+                    llm_token_consumption_total.labels(user_id=user_id_str, model=MODEL_NAME, type="prompt").inc(prompt_tokens)
+                    llm_token_consumption_total.labels(user_id=user_id_str, model=MODEL_NAME, type="completion").inc(completion_tokens)
+                except Exception as metric_err:
+                    logger.error(f"Failed to record LLM success metrics: {metric_err}")
                 
                 content = resp_data["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
@@ -843,6 +1112,11 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
                 with open(pdf_path, "rb") as pdf_file:
                     pdf_bytes = pdf_file.read()
                 compile_success = True
+                try:
+                    from app.metrics import latex_compilation_retry_total
+                    latex_compilation_retry_total.labels(status="success", attempt=str(retry_count)).inc()
+                except Exception as metric_err:
+                    logger.error(f"Failed to record LaTeX success metric: {metric_err}")
                 logger.info("LaTeX resume compiled successfully!")
                 
                 # Clear error message on success
@@ -860,6 +1134,11 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
                         db.close()
             except Exception as compile_err:
                 error_log = str(compile_err)
+                try:
+                    from app.metrics import latex_compilation_retry_total
+                    latex_compilation_retry_total.labels(status="failure", attempt=str(retry_count)).inc()
+                except Exception as metric_err:
+                    logger.error(f"Failed to record LaTeX failure metric: {metric_err}")
                 logger.warning(f"LaTeX compile attempt {retry_count} failed: {error_log}")
                 
                 # Log diagnostic to database
@@ -1098,8 +1377,15 @@ workflow.add_node("extract_llm_facts", extract_llm_facts_node)
 workflow.add_node("validate_facts", validate_facts_node)
 workflow.add_node("save_intermediate", save_intermediate_results_node)
 workflow.add_node("await_human_review", await_human_review_node)
+workflow.add_node("check_missing_context", check_missing_context_node)
+workflow.add_node("await_clarification", await_clarification_node)
 workflow.add_node("compile_documents", compile_documents_node)
 workflow.add_node("upload_metadata", upload_metadata_node)
+
+def should_clarify(state: AnalysisState) -> str:
+    if state.get("needs_clarification"):
+        return "await_clarification"
+    return "compile_documents"
 
 # Define edges
 workflow.add_edge(START, "clone_repo")
@@ -1108,7 +1394,16 @@ workflow.add_edge("extract_facts", "extract_llm_facts")
 workflow.add_edge("extract_llm_facts", "validate_facts")
 workflow.add_edge("validate_facts", "save_intermediate")
 workflow.add_edge("save_intermediate", "await_human_review")
-workflow.add_edge("await_human_review", "compile_documents")
+workflow.add_edge("await_human_review", "check_missing_context")
+workflow.add_conditional_edges(
+    "check_missing_context",
+    should_clarify,
+    {
+        "await_clarification": "await_clarification",
+        "compile_documents": "compile_documents"
+    }
+)
+workflow.add_edge("await_clarification", "check_missing_context")
 workflow.add_edge("compile_documents", "upload_metadata")
 workflow.add_edge("upload_metadata", END)
 
@@ -1117,12 +1412,12 @@ try:
     checkpointer = get_checkpointer()
     analysis_graph = workflow.compile(
         checkpointer=checkpointer,
-        interrupt_before=["await_human_review"]
+        interrupt_before=["await_human_review", "await_clarification"]
     )
 except Exception as e:
     logger.exception(f"Failed to compile LangGraph: {e}")
     analysis_graph = workflow.compile(
-        interrupt_before=["await_human_review"]
+        interrupt_before=["await_human_review", "await_clarification"]
     )  # Fallback to no checkpointer for compiling safety
 
 
