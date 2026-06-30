@@ -95,6 +95,9 @@ This checklist tracks the implementation progress of the platform. Items will be
 - [x] Add onboarding screen overlay in frontend dashboard.
 - [x] Compare last_commit_at and last_analyzed_at to skip analysis of unchanged repositories.
 - [x] Set up Playwright E2E testing framework and write integration test checking live authentication, onboarding, and repository listing.
-- [x] **First Milestone Test**: Mismatched users get 403 when querying private repos; correct users load private repos directly from DB, and unchanged repo analyses return a cached status.
+- [x] Implement review page layout scrollbar to prevent page stretching on long checklist facts.
+- [x] Implement ingestion mapping isolation in background tasks to prevent mixing repositories across different users.
+- [x] **First Milestone Test**: Mismatched users get 403 when querying private repos; correct users load private repos directly from DB, unchanged repo analyses return a cached status, and other users' public repos ingest into their own isolated profile records.
+
 
 

@@ -167,4 +167,14 @@ This document tracks every commit made during the development of the **RepoProof
     *   Implemented mock response logic in `GitHubClient` and `GitHubSyncClient` inside `github_client.py` to return mock profiles and mock repositories for `_dev` usernames, allowing the ingestion task to succeed offline.
     *   Added background WSL VM keep-alive scripts to resolve Hyper-V idle shutdown and maintain connection stability on port 5433.
 
+### Commit 14: Review Layout Scrollbar & Ingestion Isolation
+*   **Hash**: `8c72dd4`
+*   **Timestamp**: 2026-06-30 12:15:00 UTC+5:30
+*   **Message**: `fix: implement review page scrollbar layout, resolve target user repository ingestion mixing bug, and verify LaTeX output compilation`
+*   **Description**:
+    *   Updated `frontend/src/app/dashboard/review/[jobId]/page.tsx` with locked viewport heights (`h-screen overflow-hidden`) and `flex-1 min-h-0` grid columns to enable independent internal vertical scrolling of extracted facts and AI refiner chat blocks.
+    *   Modified user mapping logic inside `ingest_user_profile_task` in `backend/app/tasks.py` to prevent mapping repositories to the logged-in user's database ID unless the target username matches their github_username.
+    *   Verified that offline integration tests (`scratch/test_interrupt_resume.py`) correctly execute the post-resume workflow, compile LaTeX PDF resumes using `pdflatex` inside containers, and upload completed PDF outputs to MinIO.
+
+
 
