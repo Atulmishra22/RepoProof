@@ -58,28 +58,28 @@ This checklist tracks the implementation progress of the platform. Items will be
 
 ---
 
-## [ ] Phase 6: Output Generation
-- [ ] Define `GeneratedOutput` and `OutputDownload` database models and execute Alembic migrations.
-- [ ] Install LaTeX compilation packages (`texlive-latex-base`, `texlive-fonts-recommended`, `texlive-latex-extra`) in backend/worker Docker containers.
-- [ ] Design LLM templates to synthesize approved facts into final copies (LinkedIn summary, GitHub README, Portfolio page).
-- [ ] Implement the ATS Optimizer Reasoning stage before resume generation to select high-impact verbs/keywords.
-- [ ] Implement Jake's LaTeX resume template with dynamic single-page budget layout controls.
-- [ ] Build the 3-step AI Self-Healing compiler retry loop using LaTeX logs to fix formatting/compilation failures.
-- [ ] Save LaTeX compilation error logs and diagnostics to `AnalysisJob.error_message`.
-- [ ] Write final document compiler nodes in LangGraph and connect to the workflow.
-- [ ] Configure file uploading tasks to Cloudflare R2 / MinIO for `.pdf`, `.md`, and `.txt` files.
-- [ ] Build presigned URL generator in FastAPI backend.
-- [ ] Create frontend premium outputs page (`/dashboard/outputs/[repoId]`) with copy-to-clipboard, version selector, and download triggers.
-- [ ] **First Milestone Test**: Presigned URL download returns the correct PDF/markdown/text formats, and AI self-healing successfully diagnoses and repairs invalid LaTeX syntax.
+## [x] Phase 6: Output Generation
+- [x] Define `GeneratedOutput` and `OutputDownload` database models and execute Alembic migrations.
+- [x] Install LaTeX compilation packages (`texlive-latex-base`, `texlive-fonts-recommended`, `texlive-latex-extra`) in backend/worker Docker containers.
+- [x] Design LLM templates to synthesize approved facts into final copies (LinkedIn summary, GitHub README, Portfolio page).
+- [x] Implement the ATS Optimizer Reasoning stage before resume generation to select high-impact verbs/keywords.
+- [x] Implement Jake's LaTeX resume template with dynamic single-page budget layout controls.
+- [x] Build the 3-step AI Self-Healing compiler retry loop using LaTeX logs to fix formatting/compilation failures.
+- [x] Save LaTeX compilation error logs and diagnostics to `AnalysisJob.error_message`.
+- [x] Write final document compiler nodes in LangGraph and connect to the workflow.
+- [x] Configure file uploading tasks to Cloudflare R2 / MinIO for `.pdf`, `.md`, and `.txt` files.
+- [x] Build presigned URL generator in FastAPI backend.
+- [x] Create frontend premium outputs page (`/dashboard/outputs/[repoId]`) with copy-to-clipboard, version selector, and download triggers.
+- [x] **First Milestone Test**: Presigned URL download returns the correct PDF/markdown/text formats, and AI self-healing successfully diagnoses and repairs invalid LaTeX syntax.
 
 ---
 
-## [ ] Phase 7: Polish and Deploy
-- [ ] Implement NextAuth.js GitHub OAuth flow.
-- [ ] Add Redis rate-limiting middleware to API routes.
-- [ ] Set up the hourly review expiration and daily data purge cron tasks.
-- [ ] Deploy backend worker nodes to Render, database to Supabase, and frontend to Vercel.
-- [ ] **First Milestone Test**: OAuth login, ingestion, and generation workflows function in production.
+## [x] Phase 7: Polish and Deploy
+- [x] Implement NextAuth.js GitHub OAuth flow.
+- [x] Add Redis rate-limiting middleware to API routes.
+- [x] Set up the hourly review expiration and daily data purge cron tasks.
+- [x] Deploy backend worker nodes to Render, database to Supabase, and frontend to Vercel.
+- [x] **First Milestone Test**: OAuth login, ingestion, and generation workflows function in production.
 
 ---
 
