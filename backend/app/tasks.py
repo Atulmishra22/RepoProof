@@ -92,9 +92,13 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None):
             return {"status": "error", "message": f"Failed to fetch repositories: {str(e)}"}
 
         # 4. Upsert User in database
+        user = None
         if user_id:
-            user = db.query(User).filter(User.id == uuid.UUID(user_id)).first()
-        else:
+            logged_in_user = db.query(User).filter(User.id == uuid.UUID(user_id)).first()
+            if logged_in_user and logged_in_user.github_username == username:
+                user = logged_in_user
+
+        if not user:
             user = db.query(User).filter(User.github_username == username).first()
             if not user:
                 # Try to match by email as fallback

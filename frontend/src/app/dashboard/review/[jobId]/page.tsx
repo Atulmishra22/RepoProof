@@ -143,7 +143,7 @@ export default function ReviewPage({ params }: { params: Promise<{ jobId: string
   const activeError = localError || storeError;
 
   return (
-    <div className="min-h-screen bg-[#0a0b0d] text-white flex flex-col font-sans">
+    <div className="h-screen bg-[#0a0b0d] text-white flex flex-col font-sans overflow-hidden">
       {/* Background decoration glows */}
       <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-purple-500/10 rounded-full blur-[120px] pointer-events-none" />
       <div className="absolute bottom-0 right-1/4 w-[500px] h-[500px] bg-blue-500/5 rounded-full blur-[120px] pointer-events-none" />
@@ -211,7 +211,7 @@ export default function ReviewPage({ params }: { params: Promise<{ jobId: string
       )}
 
       {/* Workspace Grid */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 h-[calc(100vh-80px)] overflow-hidden">
+      <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 overflow-hidden">
         {/* Left Side: Facts Editor (7 Cols) */}
         <section className="lg:col-span-7 flex flex-col h-full bg-[#0f1115]/50 border border-gray-800 rounded-2xl overflow-hidden backdrop-blur-sm">
           <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-[#13161c]/40">
