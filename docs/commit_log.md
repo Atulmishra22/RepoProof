@@ -176,5 +176,12 @@ This document tracks every commit made during the development of the **RepoProof
     *   Modified user mapping logic inside `ingest_user_profile_task` in `backend/app/tasks.py` to prevent mapping repositories to the logged-in user's database ID unless the target username matches their github_username.
     *   Verified that offline integration tests (`scratch/test_interrupt_resume.py`) correctly execute the post-resume workflow, compile LaTeX PDF resumes using `pdflatex` inside containers, and upload completed PDF outputs to MinIO.
 
-
-
+### Commit 15: Phase 8B Top 3 Repository Recommendations
+*   **Hash**: `3b84df4`
+*   **Timestamp**: 2026-06-30 16:15:00 UTC+5:30
+*   **Message**: `feat: implement Repository Quality Score recommendation engine, batch-analysis controls, and checkmarked grid UI`
+*   **Description**:
+    *   Implemented async and sync `get_repository_git_tree` methods in `github_client.py` to retrieve recursive repository tree listings.
+    *   Wrote the `compute_rqs` scoring algorithm in `backend/app/main.py` weighting log-scaled code size (language byte sums), log-scaled stars, commit recency, and test suite multipliers (1.3x).
+    *   Integrated parallel scoring computations via `asyncio.gather` and timezone-aware freshness checks, backed by timestamp-keyed Redis caching.
+    *   Added `selectedRepoIds` checkbox states, recommended star badges, RQS score displays, and a batch-analyze button trigger in `frontend/src/app/dashboard/page.tsx`.

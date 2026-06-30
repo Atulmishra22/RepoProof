@@ -5,6 +5,8 @@ from sqlalchemy.sql import text
 import redis
 import json
 import logging
+import math
+import asyncio
 from pydantic import BaseModel
 from typing import Optional
 
@@ -266,6 +268,83 @@ async def ingest_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start task: {str(e)}"
         )
+async def compute_rqs(repo, token: Optional[str], redis_conn) -> float:
+    """
+    Computes the Repository Quality Score (RQS) for a repository.
+    RQS = (Base Score * Test Multiplier) + Freshness
+    """
+    # 1. Cache lookup
+    last_commit_ts = int(repo.last_commit_at.timestamp()) if repo.last_commit_at else 0
+    cache_key = f"repo_rqs:{repo.id}:{last_commit_ts}"
+    try:
+        cached_score = redis_conn.get(cache_key)
+        if cached_score:
+            return float(cached_score)
+    except Exception:
+        pass
+
+    # 2. Base score from code bytes and stars
+    languages = repo.languages or {}
+    total_code_bytes = sum(languages.values())
+    
+    size_score = math.log10(total_code_bytes + 1)
+    stars_score = math.log10(repo.star_count + 1)
+    base_score = size_score + 2.0 * stars_score
+
+    # 3. Tree Walk logic
+    test_multiplier = 1.0
+    try:
+        from app.github_client import GitHubClient
+        client = GitHubClient(token=token)
+        tree_data = await client.get_repository_git_tree(repo.owner, repo.name, repo.default_branch)
+        tree = tree_data.get("tree", [])
+        
+        src_extensions = {".py", ".ts", ".js", ".go", ".rs", ".java", ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".swift", ".kt"}
+        ignore_dirs = {"node_modules", "vendor", "bower_components", "dist", "build", "out", "target", ".git", ".idea", ".vscode"}
+        
+        src_files = 0
+        test_files = 0
+        
+        for item in tree:
+            if item.get("type") == "blob":
+                path = item.get("path", "")
+                parts = path.split("/")
+                if any(ignored in parts for ignored in ignore_dirs):
+                    continue
+                ext = "." + path.split(".")[-1].lower() if "." in path else ""
+                if ext in src_extensions:
+                    src_files += 1
+                    filename = parts[-1].lower()
+                    if "test" in filename or "spec" in filename:
+                        test_files += 1
+
+        if test_files > 0:
+            test_multiplier = 1.3
+        elif src_files == 0 and total_code_bytes > 0:
+            test_multiplier = 0.5
+    except Exception as e:
+        logger.error(f"Failed to fetch git tree for {repo.owner}/{repo.name} in RQS: {e}")
+
+    # 4. Freshness
+    if repo.last_commit_at:
+        repo_tz = repo.last_commit_at.tzinfo
+        from datetime import datetime
+        now_with_tz = datetime.now(repo_tz) if repo_tz else datetime.utcnow()
+        days_since_push = (now_with_tz - repo.last_commit_at).days
+        days_since_push = max(0, days_since_push)
+        freshness = 5.0 / (days_since_push + 1.0)
+    else:
+        freshness = 0.0
+
+    # 5. Final Score
+    rqs_score = (base_score * test_multiplier) + freshness
+    
+    try:
+        redis_conn.setex(cache_key, 86400, str(rqs_score))
+    except Exception as redis_err:
+        logger.error(f"Failed to cache RQS score: {redis_err}")
+        
+    return rqs_score
 
 
 @router.get("/repositories", tags=["repositories"])
@@ -305,6 +384,24 @@ async def get_repositories(
             Repository.user_id == target_user.id,
             Repository.is_private == False
         ).all()
+
+    # Retrieve GitHub OAuth token if available
+    account = db.query(Account).filter(
+        Account.user_id == current_user.id,
+        Account.provider == "github"
+    ).first()
+    token = account.access_token if account else None
+
+    # Calculate RQS score for all repositories in parallel
+    scoring_tasks = [compute_rqs(r, token, redis_conn) for r in repos]
+    scores = await asyncio.gather(*scoring_tasks)
+    
+    # Zip and map scores to repository IDs
+    repo_scores = {repos[i].id: scores[i] for i in range(len(repos))}
+    
+    # Rank repositories and determine top 3 recommended
+    sorted_repos = sorted(repos, key=lambda r: repo_scores.get(r.id, 0.0), reverse=True)
+    top_3_ids = {r.id for r in sorted_repos[:3]}
 
     profile_cache = redis_conn.get(f"github_profile:{target_username}")
     profile_data = None
@@ -348,6 +445,8 @@ async def get_repositories(
                         {"repo_id": r.id}
                     ).scalar()
                 ),
+                "recommendation_score": round(repo_scores.get(r.id, 0.0), 2),
+                "recommended": r.id in top_3_ids,
                 "created_at": r.created_at.isoformat(),
                 "updated_at": r.updated_at.isoformat()
             }

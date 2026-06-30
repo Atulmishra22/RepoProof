@@ -99,5 +99,14 @@ This checklist tracks the implementation progress of the platform. Items will be
 - [x] Implement ingestion mapping isolation in background tasks to prevent mixing repositories across different users.
 - [x] **First Milestone Test**: Mismatched users get 403 when querying private repos; correct users load private repos directly from DB, unchanged repo analyses return a cached status, and other users' public repos ingest into their own isolated profile records.
 
+---
 
-
+## [x] Phase 8B: Top 3 Repository Recommendations
+- [x] Add recursive Git Tree fetching method in async and sync GitHub Clients.
+- [x] Implement Repository Quality Score (RQS) algorithm combining size, stars/forks (log-scaled), freshness, and code quality modifiers.
+- [x] Run RQS calculations in parallel using asyncio.gather with automatic Redis caching based on commit timestamps.
+- [x] Extend `/repositories` API response to return recommendation_score and recommended flags.
+- [x] Add multi-select checkbox controls to repository cards in Next.js dashboard grid.
+- [x] Render recommended star badges and RQS score indicators on repo cards.
+- [x] Build batch-analysis button triggering sequential analysis for checked repositories.
+- [x] **First Milestone Test**: Top 3 repositories are pre-selected on data load, 0-star repos with unit tests are recommended correctly, and batch analysis triggers only for the selected repos.
