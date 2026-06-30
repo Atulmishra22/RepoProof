@@ -342,11 +342,14 @@ The `AnalysisState` is defined as a `TypedDict`. Below is the logical data layou
     *   No active process or thread is running in memory while waiting for human input. The Celery worker exited immediately after saving the checkpoint.
     *   If the backend crashes and restarts, the database checkpoint remains intact. When the user eventually returns to the review page and submits their edits, the API will hit the same database, find the checkpoint, and start a fresh Celery worker thread to continue execution.
 
----
-
 ## 1.7 Security & Sandbox Execution Model
 
-To run untrusted agent actions and external code dependencies safely, we implement a multi-layered Least Privilege isolation model:
+To run untrusted agent actions and protect user repository confidentiality, we implement a multi-layered Least Privilege isolation model:
+*   **Private Repository Data Isolation**: Restricts private repositories using the `verify_github_ownership` FastAPI Dependency guard. Private repositories must map to the logged-in owner's database `user_id`, verified against their active GitHub OAuth token.
+*   **3-Level Caching Security**:
+    *   *Level 1 (Meta)*: Redis-backed shared metadata keys (`github_meta:{username}`).
+    *   *Level 2 (Public)*: Redis-backed public repository list caching (`github_public_repos:{username}`).
+    *   *Level 3 (Private)*: Stored in PostgreSQL ONLY under strict `user_id` query scoping. Private repository data is **never** written to Redis to eliminate data exposure in public in-memory stores.
 *   **Read-Only Bind Mounts (`ro`)**: Cloned GitHub repository files are mapped into worker containers as Read-Only volumes. The agent can read and parse source files but has no filesystem permissions to modify, inject, or delete repository code.
 *   **Rootless Execution**: All processes within the FastAPI and Celery worker containers run as a non-privileged user (`USER 1000:1000`). Root access is blocked globally.
 *   **Ephemeral Package Target Isolation**: If the agent must download a dependency or run an custom tool, it installs packages inside a virtualized target directory (`/tmp/agent_env/`) using `uv pip install --target`. We update the running Python environment path dynamically (`sys.path.append`).
