@@ -405,6 +405,31 @@ COMMENT ON COLUMN system_events.created_at IS 'Log capture timestamp.';
 
 ---
 
+### 11. `user_preferences`
+This table stores user-specific writing styling rules, preferences, and guidelines derived from human edits.
+
+```sql
+CREATE TABLE user_preferences (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    rule TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    CONSTRAINT fk_user_preferences_user_id FOREIGN KEY (user_id) 
+        REFERENCES users (id) ON DELETE CASCADE
+);
+
+COMMENT ON TABLE user_preferences IS 'Stores style preference rules and writing style guidelines inferred per user.';
+COMMENT ON COLUMN user_preferences.id IS 'Primary key UUID.';
+COMMENT ON COLUMN user_preferences.user_id IS 'Foreign key referencing user.';
+COMMENT ON COLUMN user_preferences.rule IS 'The text description of the style or layout rule.';
+COMMENT ON COLUMN user_preferences.created_at IS 'Record creation timestamp.';
+COMMENT ON COLUMN user_preferences.updated_at IS 'Record last update timestamp.';
+```
+
+---
+
 ## Database Indexes
 
 ```sql
@@ -435,6 +460,9 @@ CREATE INDEX idx_generated_outputs_job_id ON generated_outputs(analysis_job_id);
 
 -- System Events
 CREATE INDEX idx_system_events_entity ON system_events(entity_type, entity_id);
+
+-- User Preferences
+CREATE INDEX idx_user_preferences_user_id ON user_preferences(user_id);
 ```
 
 ### Index Justification:

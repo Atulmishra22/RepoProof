@@ -263,6 +263,23 @@ RESPONSE (errors):
 RATE LIMIT: 10 requests per minute per user  
 TRIGGERS: Celery task: `resume_analysis_workflow_task` with the updated facts payload.  
 
+### POST /reviews/{job_id}/clarify
+ENDPOINT: POST /api/v1/reviews/{job_id}/clarify  
+DESCRIPTION: Responds to the Clarification Gate interruption by saving the developer's validated email address and targeted role, and resuming the paused generation workflow.  
+AUTH: required  
+ASYNC: yes (returns status)  
+REQUEST:  
+  Body:  
+    `{ "email": "string — valid email address", "target_role": "string — target job role title" }`  
+RESPONSE (200):  
+  `{ "status": "success", "message": "Clarification provided successfully. Analysis resuming." }`  
+RESPONSE (errors):  
+  400: Invalid payload schema  
+  401: Unauthorized  
+  404: Analysis job not found  
+RATE LIMIT: 10 requests per minute per user  
+TRIGGERS: Celery task: `resume_analysis_workflow_task` to resume the graph.
+
 ### POST /reviews/{job_id}/chat
 ENDPOINT: POST /api/v1/reviews/{job_id}/chat  
 DESCRIPTION: Interactive AI coding/recruiting chat assistant that helps developers modify, draft, or understand their facts in context of key files.  

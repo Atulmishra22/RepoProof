@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import String, Integer, BigInteger, Boolean, DateTime, Numeric, ForeignKey, Enum, text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 from app.database import Base
 
@@ -151,6 +152,11 @@ class User(Base):
     )
     usage_metrics: Mapped[List["UsageMetric"]] = relationship(
         "UsageMetric",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    user_preferences: Mapped[List["UserPreference"]] = relationship(
+        "UserPreference",
         back_populates="user",
         cascade="all, delete-orphan"
     )
@@ -380,6 +386,11 @@ class AnalysisJob(Base):
     user: Mapped["User"] = relationship("User", back_populates="analysis_jobs")
     generated_outputs: Mapped[List["GeneratedOutput"]] = relationship(
         "GeneratedOutput",
+        back_populates="analysis_job",
+        cascade="all, delete-orphan"
+    )
+    code_facts: Mapped[List["CodeFact"]] = relationship(
+        "CodeFact",
         back_populates="analysis_job",
         cascade="all, delete-orphan"
     )
@@ -738,3 +749,156 @@ class UsageMetric(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="usage_metrics")
+
+
+class CodeFact(Base):
+    """
+    Granular, source-cited facts extracted by LLMs from the analyzed repository.
+    """
+    __tablename__ = "code_facts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key UUID for the code fact."
+    )
+    analysis_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analysis_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="Analysis job that generated this fact."
+    )
+    category: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        comment="Category of technical information."
+    )
+    claim: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        comment="Specific technical statement."
+    )
+    source_file: Mapped[str] = mapped_column(
+        String(2048),
+        nullable=False,
+        comment="Path of the source file serving as evidence."
+    )
+    snippet: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        comment="Extracted source code snippet."
+    )
+    ats_impact: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        comment="Tailored resume/ATS bullet value explanation."
+    )
+    is_validated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="True if validation checks succeeded."
+    )
+    is_human_approved: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="True if the user approved the fact in HiTL."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=datetime.utcnow
+    )
+
+    # Relationships
+    analysis_job: Mapped["AnalysisJob"] = relationship("AnalysisJob", back_populates="code_facts")
+    fact_embedding: Mapped[Optional["FactEmbedding"]] = relationship(
+        "FactEmbedding",
+        back_populates="code_fact",
+        cascade="all, delete-orphan"
+    )
+
+
+class FactEmbedding(Base):
+    """
+    Multidimensional embeddings for approved facts to support semantic context tailoring.
+    """
+    __tablename__ = "fact_embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()")
+    )
+    code_fact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("code_facts.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True
+    )
+    embedding = mapped_column(
+        Vector(768),
+        nullable=False,
+        comment="Gemini text-embedding-004 768-dimensional float array."
+    )
+    model_used: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        comment="Model descriptor used to compute the embeddings."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    # Relationships
+    code_fact: Mapped["CodeFact"] = relationship("CodeFact", back_populates="fact_embedding")
+
+
+class UserPreference(Base):
+    """
+    Style, layout, and keyword rules learned from the user modifications.
+    """
+    __tablename__ = "user_preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False
+    )
+    rule: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        comment="Inferred rule representing the user's editing preference."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="user_preferences")
