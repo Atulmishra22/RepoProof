@@ -135,7 +135,7 @@ services:
     restart: unless-stopped
 
   langfuse:
-    image: langfuse/langfuse:2
+    image: langfuse/langfuse:3
     container_name: repoproof-langfuse
     ports:
       - "3030:3000"
@@ -145,6 +145,14 @@ services:
       - NEXTAUTH_URL=http://localhost:3030
       - SALT=langfuse_dev_salt_string
       - TELEMETRY_ENABLED=false
+      - LANGFUSE_INIT_ORG_ID=org-dev
+      - LANGFUSE_INIT_ORG_NAME=Dev Org
+      - LANGFUSE_INIT_PROJECT_ID=proj-dev
+      - LANGFUSE_INIT_PROJECT_NAME=RepoProof Dev
+      - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-dev}
+      - LANGFUSE_INIT_PROJECT_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-dev}
+      - LANGFUSE_INIT_USER_EMAIL=${LANGFUSE_INIT_USER_EMAIL}
+      - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_INIT_USER_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy

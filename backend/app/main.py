@@ -4,13 +4,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import text
 import redis
 import json
-import logging
+import structlog
 import math
 import asyncio
 from pydantic import BaseModel
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from app.logging_config import configure_logging, bind_log_context, clear_log_context
+configure_logging()
+logger = structlog.get_logger(__name__)
 
 from app.database import get_db
 from app.redis_client import get_redis, redis_client
@@ -30,6 +32,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+import uuid
+
+@app.middleware("http")
+async def add_correlation_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    bind_log_context(trace_id=request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        clear_log_context()
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 router = APIRouter(prefix="/api/v1")
 
@@ -255,9 +270,11 @@ async def ingest_user(
     Triggers the background Celery task to ingest a user's GitHub profile and repositories.
     """
     from app.tasks import ingest_user_profile_task
+    from app.logging_config import log_context
+    trace_id = log_context.get().get("trace_id")
     try:
         # Trigger Celery task asynchronously, passing user_id to map repos to current_user
-        task = ingest_user_profile_task.delay(request.username, str(current_user.id))
+        task = ingest_user_profile_task.delay(request.username, str(current_user.id), trace_id=trace_id)
         return {
             "status": "success",
             "message": f"Ingestion task started for user {request.username}",
@@ -733,8 +750,10 @@ async def trigger_repository_analysis(
 
     # 5. Trigger background Celery task
     from app.tasks import run_analysis_workflow_task
+    from app.logging_config import log_context
+    trace_id = log_context.get().get("trace_id")
     try:
-        task = run_analysis_workflow_task.delay(str(repo.id), str(job_id))
+        task = run_analysis_workflow_task.delay(str(repo.id), str(job_id), trace_id=trace_id)
         
         # 6. Save Celery Task ID in DB
         db.query(AnalysisJob).filter(AnalysisJob.id == job_id).update({
@@ -809,6 +828,47 @@ async def get_repository_analysis_result(
             detail="Repository not found."
         )
 
+    # Try database first
+    latest_job = db.query(AnalysisJob).filter(AnalysisJob.repository_id == repo.id).order_by(AnalysisJob.created_at.desc()).first()
+    if latest_job:
+        from app.models import CodeFact
+        db_facts = db.query(CodeFact).filter(CodeFact.analysis_job_id == latest_job.id).all()
+        if db_facts:
+            facts_list = []
+            for df in db_facts:
+                facts_list.append({
+                    "id": str(df.id),
+                    "category": df.category,
+                    "claim": df.claim,
+                    "source_file": df.source_file,
+                    "snippet": df.snippet,
+                    "ats_impact": df.ats_impact,
+                    "is_validated": df.is_validated,
+                    "is_human_approved": df.is_human_approved
+                })
+            
+            # Fetch suggested questions and metrics
+            try:
+                from app.analysis_graph import get_s3_client
+                s3 = get_s3_client()
+                bucket_name = "repoproof-data"
+                s3_key = f"repos/{id}/analysis_result.json"
+                response = s3.get_object(Bucket=bucket_name, Key=s3_key)
+                result_data = json.loads(response["Body"].read().decode("utf-8"))
+                return {
+                    "facts": facts_list,
+                    "suggested_questions": result_data.get("suggested_questions", []),
+                    "llm_tokens_used": result_data.get("llm_tokens_used", latest_job.llm_tokens_used or 0),
+                    "llm_cost_usd": result_data.get("llm_cost_usd", float(latest_job.llm_cost_usd or 0.0))
+                }
+            except Exception:
+                return {
+                    "facts": facts_list,
+                    "suggested_questions": [],
+                    "llm_tokens_used": latest_job.llm_tokens_used or 0,
+                    "llm_cost_usd": float(latest_job.llm_cost_usd or 0.0)
+                }
+
     from app.analysis_graph import get_s3_client
     try:
         s3 = get_s3_client()
@@ -819,7 +879,6 @@ async def get_repository_analysis_result(
         result_data = json.loads(response["Body"].read().decode("utf-8"))
         return result_data
     except s3.exceptions.NoSuchKey:
-        # Fallback if result has not been uploaded yet
         return {
             "facts": [],
             "suggested_questions": [],
@@ -845,7 +904,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 import redis.asyncio as async_redis
 import asyncio
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class ConnectionManager:
     def __init__(self):
@@ -854,11 +913,15 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        from app.metrics import active_websocket_connections
+        active_websocket_connections.inc()
         logger.info(f"WebSocket client connected. Total clients: {len(self.active_connections)}")
         
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            from app.metrics import active_websocket_connections
+            active_websocket_connections.dec()
             logger.info(f"WebSocket client disconnected. Total clients: {len(self.active_connections)}")
         
     async def broadcast(self, message: dict):
@@ -928,10 +991,19 @@ async def update_facts_and_resume(
             detail="Analysis job not found."
         )
         
+    from datetime import datetime
+    from app.metrics import human_review_turnaround_seconds
+    from app.logging_config import log_context
+    
+    if job.updated_at:
+        turnaround = (datetime.utcnow() - job.updated_at).total_seconds()
+        human_review_turnaround_seconds.labels(status="approved").observe(turnaround)
+        
+    trace_id = log_context.get().get("trace_id")
+
     from app.tasks import resume_analysis_workflow_task
     try:
-        # Trigger Celery task to update state and resume
-        resume_analysis_workflow_task.delay(str(job.id), payload.facts)
+        resume_analysis_workflow_task.delay(str(job.id), payload.facts, trace_id=trace_id)
         return {
             "status": "success",
             "message": "Analysis resume triggered successfully with updated facts."
@@ -940,6 +1012,61 @@ async def update_facts_and_resume(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to trigger resume: {str(e)}"
+        )
+
+
+class ClarificationPayload(BaseModel):
+    email: str
+    target_role: str
+
+@router.post("/reviews/{job_id}/clarify", tags=["analysis"])
+async def clarify_missing_context(
+    job_id: str,
+    payload: ClarificationPayload,
+    db: Session = Depends(get_db)
+):
+    """
+    POST /api/v1/reviews/{job_id}/clarify
+    Responds to the Clarification Gate by saving contact details (email) and target role,
+    and resumes the workflow.
+    """
+    job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis job not found."
+        )
+        
+    from app.models import User
+    user = db.query(User).filter(User.id == job.user_id).first()
+    if user:
+        user.email = payload.email
+        db.commit()
+
+    from app.analysis_graph import analysis_graph
+    try:
+        config = {"configurable": {"thread_id": job_id}}
+        # Update graph state with the target role and resolve clarification flag
+        analysis_graph.update_state(
+            config,
+            {"target_role": payload.target_role, "needs_clarification": False},
+            as_node="await_clarification"
+        )
+        
+        # Resume the workflow via Celery
+        from app.tasks import resume_analysis_workflow_task
+        from app.logging_config import log_context
+        trace_id = log_context.get().get("trace_id")
+        resume_analysis_workflow_task.delay(str(job.id), None, trace_id=trace_id)
+        
+        return {
+            "status": "success",
+            "message": "Clarification provided successfully. Analysis resuming."
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to provide clarification and resume: {str(e)}"
         )
 
 
@@ -1499,6 +1626,36 @@ async def update_user_profile(
             "subscription_tier": user.subscription_tier.value if hasattr(user.subscription_tier, 'value') else user.subscription_tier
         }
     }
+
+
+@app.get("/metrics", tags=["monitoring"])
+@router.get("/metrics", tags=["monitoring"])
+def get_prometheus_metrics():
+    try:
+        from app.redis_client import redis_client
+        backlog = redis_client.llen("celery")
+        from app.metrics import celery_task_backlog
+        celery_task_backlog.labels(queue="celery").set(backlog)
+    except Exception as e:
+        logger.warning(f"Failed to fetch Celery backlog: {e}")
+        
+    try:
+        from app.analysis_graph import get_s3_client
+        s3 = get_s3_client()
+        bucket_name = "repoproof-data"
+        response = s3.list_objects_v2(Bucket=bucket_name)
+        total_bytes = 0
+        if "Contents" in response:
+            for obj in response["Contents"]:
+                total_bytes += obj.get("Size", 0)
+        from app.metrics import r2_storage_bytes_total
+        r2_storage_bytes_total.labels(bucket="raw-repositories").set(total_bytes)
+    except Exception as e:
+        logger.warning(f"Failed to fetch MinIO storage: {e}")
+        
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    from fastapi import Response
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 app.include_router(router)

@@ -185,3 +185,40 @@ This document tracks every commit made during the development of the **RepoProof
     *   Wrote the `compute_rqs` scoring algorithm in `backend/app/main.py` weighting log-scaled code size (language byte sums), log-scaled stars, commit recency, and test suite multipliers (1.3x).
     *   Integrated parallel scoring computations via `asyncio.gather` and timezone-aware freshness checks, backed by timestamp-keyed Redis caching.
     *   Added `selectedRepoIds` checkbox states, recommended star badges, RQS score displays, and a batch-analyze button trigger in `frontend/src/app/dashboard/page.tsx`.
+
+### Commit 16: Phase 9 Close Design Gap
+*   **Hash**: `cc3f042`
+*   **Timestamp**: 2026-06-30 20:00:00 UTC+5:30
+*   **Message**: `feat: implement code facts database storage, fact embeddings, user preference reflection, GraphRAG context pruning, and Clarification Gate`
+*   **Description**:
+    *   Defined SQL models for `CodeFact`, `FactEmbedding`, and `UserPreference` inside `backend/app/models.py`.
+    *   Switched postgres image to `pgvector/pgvector:pg16` in `docker-compose.yml` and ran database migrations.
+    *   Updated the LangGraph flow in `backend/app/analysis_graph.py` to synchronize extracted and approved claims in the PostgreSQL `code_facts` table.
+    *   Refactored `GET /repositories/{id}/analysis-result` to read approved facts from PostgreSQL first, falling back to MinIO.
+    *   Built background Celery tasks `compute_fact_embeddings_task` and `reflect_user_preferences_task` triggered upon fact approval, generating pgvector embeddings via LiteLLM and reflecting styling rules into `user_preferences`.
+    *   Implemented GraphRAG context pruning in `build_dependency_graph` to identify reachable files from entry points and prune the LLM context window.
+    *   Integrated dynamic Clarification Gate (`check_missing_context_node`) pausing workflow for missing contact info or target role, exposing POST `/reviews/{job_id}/clarify` endpoint to resume.
+    *   Updated test suite `backend/app/tests/test_analysis.py` verifying successful runs and gate interruption flows.
+
+### Commit 17: LiteLLM Key Extraction
+*   **Hash**: `c969260`
+*   **Timestamp**: 2026-07-01 09:14:50 UTC+5:30
+*   **Message**: `chore: move LiteLLM API key to environment variable and configure local .env file`
+*   **Description**:
+    *   Sanitized the entire Git history using git filter-branch to completely purge the hardcoded Gemini API key from all previous commits in `litellm/config.yaml`.
+    *   Configured LiteLLM to load the key dynamically using the `os.environ/GEMINI_API_KEY` setting.
+    *   Exposed `GEMINI_API_KEY` to the `litellm` service container environment in `docker-compose.yml`.
+    *   Added `.env` to the root `.gitignore` and created `.env.example` with setup templates.
+
+### Commit 18: Phase 10 Production Observability
+*   **Hash**: `dac5b2f`
+*   **Timestamp**: 2026-07-01 09:50:00 UTC+5:30
+*   **Message**: `feat: implement Prometheus metrics endpoints, structlog JSON structured logs, and HTTP correlation ID middleware`
+*   **Description**:
+    *   Defined 9 custom Prometheus gauges, counters, and histograms in `backend/app/metrics.py`.
+    *   Exposed `/metrics` and `/api/v1/metrics` endpoints in `main.py`, dynamically calculating Celery backlog lengths and MinIO storage folder sizes on scrapings.
+    *   Recorded active WebSocket connections and human review turnaround durations.
+    *   Replaced standard python logger with structlog JSON structured logs outputted to stdout.
+    *   Added HTTP correlation ID middleware generating and forwarding request-scoped `X-Request-ID` tracing tags across Celery tasks and Langfuse generation observations.
+    *   Ran test suite verifying all 16 tests pass and Prometheus metrics scrape successfully.
+

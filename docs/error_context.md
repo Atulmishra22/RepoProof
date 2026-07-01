@@ -126,3 +126,9 @@ This document serves as the runtime and compilation log for the project developm
 - **Diagnosis**: The legacy test `test_run_analysis_graph_directly` was written in Phase 3 assuming the graph would run to completion. In Phase 5, the human review interrupt was inserted, causing the graph to pause at `awaiting_review` instead of `complete`.
 - **Resolution**: Updated the status assertion in `backend/app/tests/test_analysis.py` to assert `awaiting_review` since the graph halts before review confirmation.
 
+### 2026-06-30 18:07 - Event: Playwright E2E Tests Execution
+- **Status**: Success
+- **Context**: Running frontend E2E integration tests.
+- **Error Encountered**: None (after booting server).
+- **Diagnosis**: Playwright configuration defines `baseURL: "http://localhost:3000"` but does not boot a local Next.js server automatically. Since the Next.js frontend dev server was not running on the initial attempt, connection requests failed.
+- **Resolution**: Started the Next.js frontend development server on port 3000 using `npm run dev` as a background task. Re-running the E2E Playwright suite successfully resolved the issue, with all tests passing cleanly. Terminated the background dev server task afterwards to clean up port bindings.
