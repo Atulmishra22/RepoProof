@@ -991,12 +991,15 @@ async def update_facts_and_resume(
             detail="Analysis job not found."
         )
         
-    from datetime import datetime
+    from datetime import datetime, timezone
     from app.metrics import human_review_turnaround_seconds
     from app.logging_config import log_context
     
     if job.updated_at:
-        turnaround = (datetime.utcnow() - job.updated_at).total_seconds()
+        job_updated = job.updated_at
+        if job_updated.tzinfo is None:
+            job_updated = job_updated.replace(tzinfo=timezone.utc)
+        turnaround = (datetime.now(timezone.utc) - job_updated).total_seconds()
         human_review_turnaround_seconds.labels(status="approved").observe(turnaround)
         
     trace_id = log_context.get().get("trace_id")
