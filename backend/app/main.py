@@ -259,6 +259,7 @@ async def health_check(
 
 class UserIngestRequest(BaseModel):
     username: str
+    force_refresh: Optional[bool] = False
 
 
 @router.post("/users/ingest", tags=["users"])
@@ -274,7 +275,12 @@ async def ingest_user(
     trace_id = log_context.get().get("trace_id")
     try:
         # Trigger Celery task asynchronously, passing user_id to map repos to current_user
-        task = ingest_user_profile_task.delay(request.username, str(current_user.id), trace_id=trace_id)
+        task = ingest_user_profile_task.delay(
+            request.username, 
+            str(current_user.id), 
+            trace_id=trace_id,
+            force_refresh=request.force_refresh
+        )
         return {
             "status": "success",
             "message": f"Ingestion task started for user {request.username}",
@@ -383,7 +389,7 @@ async def get_repositories(
             "message": "Connect your GitHub account or enter a GitHub username to get started."
         }
 
-    is_owner = (current_user.github_username == target_username) and (current_user.auth_provider == "github")
+    is_owner = (current_user.github_username == target_username) and (current_user.github_username is not None)
     
     target_user = db.query(User).filter(User.github_username == target_username).first()
     if not target_user:
@@ -438,6 +444,19 @@ async def get_repositories(
             "github_id": None,
             "readme": None
         }
+
+    # Mask email if current user is not the owner
+    if not is_owner and profile_data and profile_data.get("email"):
+        email_str = profile_data["email"]
+        if "@" in email_str:
+            parts = email_str.split("@")
+            name_part = parts[0]
+            domain_part = parts[1]
+            if len(name_part) <= 2:
+                masked_name = name_part[0] + "*" * (len(name_part) - 1)
+            else:
+                masked_name = name_part[:2] + "*" * (len(name_part) - 2)
+            profile_data["email"] = f"{masked_name}@{domain_part}"
 
     return {
         "repositories": [
@@ -1604,7 +1623,13 @@ async def update_user_profile(
     if payload.subscription_tier is not None:
         user.subscription_tier = payload.subscription_tier
     if payload.github_username is not None:
-        user.github_username = payload.github_username.strip() if payload.github_username else None
+        new_username = payload.github_username.strip() if payload.github_username else None
+        if user.github_username and user.github_username != new_username:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GitHub username is permanently locked and cannot be changed."
+            )
+        user.github_username = new_username
         
     db.commit()
     
