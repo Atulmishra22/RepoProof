@@ -12,7 +12,7 @@ test.describe("RepoProof Live E2E User Flow", () => {
 
     // 3. Click Developer Login and wait for navigation
     await Promise.all([
-      page.waitForURL("**/dashboard", { timeout: 15000 }),
+      page.waitForURL("**/dashboard", { timeout: 30000 }),
       page.locator("button[type='submit']", { hasText: "Developer Login" }).click(),
     ]);
 

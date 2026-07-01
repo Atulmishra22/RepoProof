@@ -110,3 +110,31 @@ This checklist tracks the implementation progress of the platform. Items will be
 - [x] Render recommended star badges and RQS score indicators on repo cards.
 - [x] Build batch-analysis button triggering sequential analysis for checked repositories.
 - [x] **First Milestone Test**: Top 3 repositories are pre-selected on data load, 0-star repos with unit tests are recommended correctly, and batch analysis triggers only for the selected repos.
+
+---
+
+## [x] Phase 9: Close Design Gap
+- [x] Define SQLAlchemy Models for `CodeFact`, `FactEmbedding`, and `UserPreference` in `models.py`.
+- [x] Update PostgreSQL image in `docker-compose.yml` to `pgvector/pgvector:pg16` for vector similarity searches.
+- [x] Autogenerate and customize Alembic migrations, enabling `vector` extension and retaining LangGraph checkpoint tables.
+- [x] Implement database synchronization logic in LangGraph analysis graph (`save_facts_to_db`) and update node steps.
+- [x] Refactor API `GET /api/v1/repositories/{id}/analysis-result` to read approved facts from PostgreSQL `code_facts` first.
+- [x] Trigger Celery task `compute_fact_embeddings_task` to compute `text-embedding-004` fact embeddings via LiteLLM upon approval.
+- [x] Implement preference reflection task `reflect_user_preferences_task` comparing original and edited claims using LLM to extract rule logs into `user_preferences`.
+- [x] Write GraphRAG dependency graph crawler (`build_dependency_graph`) to generate `project_graph.json` and prune LLM retrieval context.
+- [x] Add dynamic Clarification Gate validation checks (`check_missing_context_node`) and interrupt flow.
+- [x] Implement `/reviews/{job_id}/clarify` POST endpoint to update email, set target role, and resume analysis.
+- [x] Update test suite with verification assertions for both successful analysis runs and clarification gate interruption/resume flows.
+- [x] **First Milestone Test**: Ran backend tests confirming that the full analysis graph completes, clarification gate correctly pauses/resumes execution, and all 16 unit tests pass.
+
+---
+
+## [x] Phase 10: Production Observability
+- [x] Create Prometheus metrics definitions in `metrics.py` for all 9 custom metrics from `docs/observability_design.md`.
+- [x] Integrate Prometheus metrics endpoints `GET /metrics` and `GET /api/v1/metrics` in `main.py` with live scrapes fetching Redis backlog list length and MinIO storage folder byte sizes dynamically.
+- [x] Increment/decrement websocket connection gauges in ConnectionManager connect/disconnect loops.
+- [x] Record human review turnaround durations in PATCH facts endpoint.
+- [x] Replace standard python logger with structured `structlog` logger outputting formatted JSON on stdout.
+- [x] Implement request correlation ID middleware generating or forwarding `X-Request-ID` tracing IDs.
+- [x] Pass correlation `trace_id` through FastAPI HTTP middleware -> Celery tasks -> Langfuse spans.
+- [x] **First Milestone Test**: Verified metrics scrape successfully returning all 9 Gauges, Counters, and Histograms, logs print as valid structured JSON containing trace/user/job contexts, and correlation IDs propagate cleanly across tasks.
