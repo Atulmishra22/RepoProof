@@ -73,6 +73,40 @@ export default function DashboardPage() {
     fetchAuthProfile();
   }, []);
   const [ingesting, setIngesting] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleManualSync = async () => {
+    if (!currentUsername) return;
+    setIsSyncing(true);
+    try {
+      const response = await fetch("http://localhost:8000/api/v1/users/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ username: currentUsername, force_refresh: true }),
+      });
+
+      if (response.ok) {
+        let attempts = 0;
+        const interval = setInterval(async () => {
+          attempts++;
+          await fetchUserData(currentUsername);
+          if (attempts >= 4) {
+            clearInterval(interval);
+            setIsSyncing(false);
+          }
+        }, 3000);
+      } else {
+        setIsSyncing(false);
+        alert("Failed to refresh GitHub data.");
+      }
+    } catch (error) {
+      setIsSyncing(false);
+      alert("Error connecting to server while syncing data.");
+    }
+  };
+
   const [statusMessage, setStatusMessage] = useState("");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [activeJobs, setActiveJobs] = useState<Record<string, { jobId: string; currentNode: string | null }>>({});
@@ -195,7 +229,11 @@ export default function DashboardPage() {
         );
       } else {
         const errData = await response.json();
-        alert(`Failed to start analysis: ${errData.detail || "Unknown error"}`);
+        if (response.status === 429) {
+          setConnectionError("Rate Limit Reached: Free accounts are limited to 5 repository analyses per hour. Please wait a bit or upgrade to Pro to unlock unlimited runs.");
+        } else {
+          alert(`Failed to start analysis: ${errData.detail || "Unknown error"}`);
+        }
       }
     } catch (err) {
       console.error("Error triggering analysis:", err);
@@ -583,6 +621,30 @@ export default function DashboardPage() {
               <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
               <span>Connected Profile: <strong className="text-zinc-200">{currentUsername}</strong></span>
             </div>
+            {currentUsername && (
+              <button
+                onClick={handleManualSync}
+                disabled={isSyncing}
+                className="text-xs font-semibold text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-zinc-700 px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {isSyncing ? (
+                  <>
+                    <svg className="animate-spin h-3.5 w-3.5 text-zinc-400" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    <span>Syncing...</span>
+                  </>
+                ) : (
+                  <>
+                    <svg className="h-3.5 w-3.5 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                    </svg>
+                    <span>Refresh GitHub Data</span>
+                  </>
+                )}
+              </button>
+            )}
             <button
               onClick={handleSignOut}
               className="rounded-lg bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:text-white transition-all cursor-pointer"

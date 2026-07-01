@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, List
 from app.celery_app import celery_app
 from app.database import SessionLocal
-from app.models import User, Repository
+from app.models import User, Repository, Account
 from app.github_client import GitHubSyncClient, GitHubClientError
 from app.redis_client import redis_client
 
@@ -13,7 +13,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 @celery_app.task(name="app.tasks.ingest_user_profile_task")
-def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace_id: Optional[str] = None):
+def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace_id: Optional[str] = None, force_refresh: bool = False):
     """
     Background task to fetch user details, profile README, and public repositories from GitHub.
     Saves User/Repositories to PostgreSQL, and caches the parsed profile in Redis.
@@ -29,7 +29,15 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
     try:
         # Initialize GitHub client
         import os
-        token = os.environ.get("GITHUB_TOKEN")
+        token = None
+        if user_id:
+            account = db.query(Account).filter(Account.user_id == uuid.UUID(user_id)).first()
+            if account:
+                token = account.access_token
+                
+        if not token:
+            token = os.environ.get("GITHUB_TOKEN")
+            
         gh = GitHubSyncClient(token=token)
 
         # 1. Fetch User profile details
@@ -55,13 +63,16 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
         except Exception as e:
             logger.warning(f"Error fetching profile README for {username}: {e}")
 
-        # 3. Fetch list of public repositories (use database-cached metadata if available to save API limits)
+        # 3. Fetch list of public repositories (use database-cached metadata if available to save API limits, unless force_refresh is True)
         repos = []
         try:
-            existing_repos = db.query(Repository).filter(
-                Repository.owner == username,
-                Repository.is_private == False
-            ).all()
+            existing_repos = []
+            if not force_refresh:
+                existing_repos = db.query(Repository).filter(
+                    Repository.owner == username,
+                    Repository.is_private == False
+                ).all()
+
             if existing_repos:
                 logger.info(f"Re-using {len(existing_repos)} repository records found in database for owner: {username}")
                 seen_ids = set()
@@ -77,10 +88,11 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
                             "stargazers_count": r.star_count,
                             "owner": {"login": r.owner},
                             "languages_map": r.languages,
-                            "private": r.is_private
+                            "private": r.is_private,
+                            "pushed_at": r.last_commit_at.isoformat() if r.last_commit_at else None
                         })
             else:
-                logger.info(f"No existing repositories in DB for owner {username}. Querying GitHub API.")
+                logger.info(f"No existing repositories in DB or force_refresh=True for owner {username}. Querying GitHub API.")
                 repos_raw = gh.list_repositories(username)
                 for repo_data in repos_raw:
                     repos.append({
@@ -92,7 +104,8 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
                         "stargazers_count": repo_data.get("stargazers_count", 0),
                         "owner": {"login": repo_data.get("owner", {}).get("login", "")},
                         "languages_map": None,
-                        "private": repo_data.get("private", False)
+                        "private": repo_data.get("private", False),
+                        "pushed_at": repo_data.get("pushed_at")
                     })
         except GitHubClientError as e:
             logger.error(f"Failed to fetch repositories for user {username}: {e}")
@@ -139,7 +152,16 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
         }
         redis_client.setex(f"github_profile:{username}", 86400, json.dumps(profile_data))
 
-        # 5. Upsert repositories in database
+        # 5. Reconciliation & Upsert of repositories in database
+        if force_refresh:
+            github_repo_ids = {repo_data.get("id") for repo_data in repos if repo_data.get("id")}
+            db_repos = db.query(Repository).filter(Repository.user_id == user.id).all()
+            for r in db_repos:
+                if r.github_repo_id not in github_repo_ids:
+                    logger.info(f"Removing deleted repository {r.owner}/{r.name} (ID: {r.github_repo_id}) from database.")
+                    db.delete(r)
+            db.flush()
+
         processed_repos_count = 0
         for repo_data in repos:
             repo_owner = repo_data.get("owner", {}).get("login", "")
@@ -150,6 +172,17 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
             primary_language = repo_data.get("language")
             star_count = repo_data.get("stargazers_count", 0)
             is_private = repo_data.get("private", False)
+            pushed_at = repo_data.get("pushed_at")
+
+            pushed_at_dt = None
+            if pushed_at:
+                try:
+                    if isinstance(pushed_at, str):
+                        pushed_at_dt = datetime.fromisoformat(pushed_at.replace("Z", "+00:00"))
+                    elif isinstance(pushed_at, datetime):
+                        pushed_at_dt = pushed_at
+                except Exception as e:
+                    logger.warning(f"Failed to parse pushed_at datetime '{pushed_at}': {e}")
 
             # Check if we have languages cached or need to fetch
             languages_map = repo_data.get("languages_map")
@@ -178,7 +211,8 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
                     languages=languages_map,
                     star_count=star_count,
                     is_private=is_private,
-                    analysis_status="pending"
+                    analysis_status="pending",
+                    last_commit_at=pushed_at_dt
                 )
                 db.add(repo)
             else:
@@ -190,6 +224,7 @@ def ingest_user_profile_task(username: str, user_id: Optional[str] = None, trace
                 repo.languages = languages_map
                 repo.star_count = star_count
                 repo.is_private = is_private
+                repo.last_commit_at = pushed_at_dt
                 repo.updated_at = datetime.utcnow()
             
             processed_repos_count += 1
