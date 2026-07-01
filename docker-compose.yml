@@ -135,7 +135,7 @@ services:
     restart: unless-stopped
 
   langfuse:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:2
     container_name: repoproof-langfuse
     ports:
       - "3030:3000"
