@@ -704,7 +704,8 @@ async def trigger_repository_analysis(
         )
 
     # Change detection check (skip if not forced and repo is unchanged)
-    if not force and repo.last_analyzed_at and repo.last_commit_at:
+    is_mock = "mock" in repo.github_url or "_dev" in repo.github_url or "developer_dev" in repo.owner
+    if not force and not is_mock and repo.last_analyzed_at and repo.last_commit_at:
         last_commit = repo.last_commit_at
         last_analyzed = repo.last_analyzed_at
         if last_commit.tzinfo is not None and last_analyzed.tzinfo is None:
