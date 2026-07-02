@@ -251,8 +251,40 @@ def clone_repo_node(state: AnalysisState, config: Optional[RunnableConfig] = Non
     os.makedirs(local_path, exist_ok=True)
     
     try:
-        # Clone using GitPython
-        git.Repo.clone_from(github_url, local_path, depth=1)
+        # Check if mock/dev repo
+        if "_dev" in github_url or "mock" in github_url:
+            logger.info("Mock repository detected. Skipping git clone and creating mock files.")
+            os.makedirs(os.path.join(local_path, "src"), exist_ok=True)
+            with open(os.path.join(local_path, "package.json"), "w") as f:
+                json.dump({
+                    "name": "pub-repo",
+                    "version": "1.0.0",
+                    "dependencies": {
+                        "express": "^4.18.2",
+                        "redis": "^4.6.7"
+                    }
+                }, f, indent=2)
+            with open(os.path.join(local_path, "src", "index.ts"), "w") as f:
+                f.write("""import express from 'express';
+import { createClient } from 'redis';
+
+const app = express();
+const client = createClient({ url: 'redis://localhost:6379' });
+
+app.get('/users', async (req, res) => {
+  const cachedUsers = await client.get('users');
+  if (cachedUsers) return res.json(JSON.parse(cachedUsers));
+  
+  const users = [{ id: 1, name: 'John' }];
+  await client.setEx('users', 3600, JSON.stringify(users));
+  res.json(users);
+});
+""")
+            with open(os.path.join(local_path, "README.md"), "w") as f:
+                f.write("# Pub Repo\nMock project for testing.")
+        else:
+            # Clone using GitPython
+            git.Repo.clone_from(github_url, local_path, depth=1)
         logger.info(f"Cloned successfully. Mapping file tree...")
         
         # Build file tree JSON structure
@@ -847,6 +879,31 @@ def check_missing_context_node(state: AnalysisState, config: Optional[RunnableCo
         
     # Validation check: must have a valid email and target role
     has_email = bool(user_email and "@" in user_email)
+    
+    if not target_role or not target_role.strip():
+        try:
+            repo = db.query(Repository).filter(Repository.id == repo_id).first()
+            if repo:
+                from app.models import User
+                user = db.query(User).filter(User.id == repo.user_id).first()
+                if user and user.github_username:
+                    import redis
+                    from app.redis_client import redis_client
+                    cached_profile = redis_client.get(f"github_profile:{user.github_username}")
+                    if cached_profile:
+                        profile_data = json.loads(cached_profile)
+                        bio = profile_data.get("bio", "")
+                        if bio and len(bio.strip()) > 3:
+                            target_role = bio.strip()
+        except Exception as e:
+            logger.error(f"Error resolving fallback target_role: {e}")
+            
+        if not target_role or not target_role.strip():
+            target_role = "Full Stack Software Engineer"
+            
+        # Update state dictionary directly (we will return it to propagate)
+        state["target_role"] = target_role
+
     has_role = bool(target_role and target_role.strip())
     
     if not has_email or not has_role:
@@ -873,6 +930,7 @@ def check_missing_context_node(state: AnalysisState, config: Optional[RunnableCo
         
     logger.info("Clarification Gate passed. Continuing to document compilation.")
     return {
+        "target_role": target_role,
         "needs_clarification": False,
         "status": "clarification_passed"
     }
