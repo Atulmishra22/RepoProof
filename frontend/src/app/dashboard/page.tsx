@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { signIn, signOut } from "next-auth/react";
+import ProfileCompletionModal from "@/components/ProfileCompletionModal";
 
 interface Repository {
   id: string;
@@ -19,6 +20,23 @@ interface Repository {
   latest_job_id?: string | null;
   created_at: string;
   updated_at: string;
+  recommendation_score?: number;
+  recommended?: boolean;
+}
+
+interface UserProfile {
+  full_name: string | null;
+  email: string;
+  phone: string | null;
+  location: string | null;
+  college: string | null;
+  degree: string | null;
+  cgpa: string | null;
+  graduation_year: string | null;
+  linkedin_url: string | null;
+  portfolio_url: string | null;
+  github_username: string | null;
+  profile_complete: boolean;
 }
 
 interface Profile {
@@ -45,6 +63,22 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [onboardingRequired, setOnboardingRequired] = useState(false);
   const [selectedRepoIds, setSelectedRepoIds] = useState<string[]>([]);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [buildingResume, setBuildingResume] = useState(false);
+  const [resumeJobId, setResumeJobId] = useState<string | null>(null);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+
+  const fetchUserProfile = async () => {
+    try {
+      const res = await fetch("http://localhost:8000/api/v1/users/me/profile");
+      if (res.ok) {
+        const data: UserProfile = await res.json();
+        setUserProfile(data);
+      }
+    } catch {
+      // Silently fail — non-critical
+    }
+  };
 
   useEffect(() => {
     async function fetchAuthProfile() {
@@ -56,6 +90,12 @@ export default function DashboardPage() {
           if (data.github_username) {
             setCurrentUsername(data.github_username);
             setOnboardingRequired(false);
+            // Auto-trigger ingestion for OAuth users (check if this is first login)
+            if (data.auth_provider === "github") {
+              await triggerAutoIngest(data.github_username);
+            }
+            // Fetch user profile data for completeness indicator
+            await fetchUserProfile();
           } else {
             setOnboardingRequired(true);
             setLoading(false);
@@ -72,6 +112,44 @@ export default function DashboardPage() {
     }
     fetchAuthProfile();
   }, []);
+
+  const triggerAutoIngest = async (username: string) => {
+    try {
+      console.log(`[AUTO-INGEST] Starting ingest for ${username}`);
+      const ingestRes = await fetch("http://localhost:8000/api/v1/users/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ username, force_refresh: false }),
+      });
+
+      const ingestData = await ingestRes.json();
+      console.log("[AUTO-INGEST] Ingest response:", ingestData);
+
+      if (ingestRes.ok) {
+        // Poll for data to populate (retry up to 10 times)
+        let attempts = 0;
+        const maxAttempts = 10;
+        const pollInterval = setInterval(async () => {
+          attempts++;
+          console.log(`[AUTO-INGEST] Poll attempt ${attempts}/${maxAttempts}`);
+          await fetchUserData(username);
+          if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+            setLoading(false);
+            console.log("[AUTO-INGEST] Polling completed");
+          }
+        }, 1500);
+      } else {
+        console.error("[AUTO-INGEST] Ingest failed:", ingestData);
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error("[AUTO-INGEST] Exception:", error);
+      setLoading(false);
+    }
+  };
   const [ingesting, setIngesting] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -161,15 +239,22 @@ export default function DashboardPage() {
     setConnectionError(null);
     try {
       const response = await fetch(`http://localhost:8000/api/v1/repositories?username=${username}`);
+      console.log(`[FETCH] Response status: ${response.status} for user: ${username}`);
+      
       if (response.ok) {
         const data = await response.json();
+        console.log(`[FETCH] Backend returned:`, data);
+        console.log(`[FETCH] Repository count: ${data.repositories?.length || 0}`);
+        
         if (data.onboarding_required) {
+          console.warn("[FETCH] Onboarding still required - repos may not be ingested yet");
           setOnboardingRequired(true);
           setRepositories([]);
           setProfile(null);
         } else {
           setOnboardingRequired(false);
           const repos = data.repositories || [];
+          console.log(`[FETCH] Setting ${repos.length} repositories in state`);
           setRepositories(repos);
           setProfile(data.profile || null);
           const recommendedIds = repos
@@ -178,10 +263,12 @@ export default function DashboardPage() {
           setSelectedRepoIds(recommendedIds);
         }
       } else {
+        const errorData = await response.text();
+        console.error(`[FETCH] Backend error (${response.status}):`, errorData);
         setConnectionError(`Backend responded with status ${response.status}. Please check backend logs.`);
       }
     } catch (error) {
-      console.error("Error fetching data:", error);
+      console.error("[FETCH] Exception:", error);
       setConnectionError("Failed to fetch data from backend. Make sure the FastAPI container is running inside WSL.");
     } finally {
       setLoading(false);
@@ -206,6 +293,30 @@ export default function DashboardPage() {
         return [...prev, repoId];
       }
     });
+  };
+
+  const handleBuildResume = async () => {
+    if (selectedRepoIds.length === 0) return;
+    setBuildingResume(true);
+    try {
+      const res = await fetch("http://localhost:8000/api/v1/users/me/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_ids: selectedRepoIds }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setResumeJobId(data.job_id);
+        router.push(`/dashboard/resume/${data.job_id}`);
+      } else {
+        const err = await res.json();
+        setStatusMessage(`Error: ${err.detail || "Failed to start resume generation"}`);
+      }
+    } catch {
+      setStatusMessage("Failed to connect to backend.");
+    } finally {
+      setBuildingResume(false);
+    }
   };
 
   const handleAnalyze = async (repoId: string) => {
@@ -899,6 +1010,46 @@ export default function DashboardPage() {
               </div>
             ) : null}
 
+            {/* Profile Completeness Indicator */}
+            {userProfile !== null && (
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Resume Profile
+                  </span>
+                  <button
+                    onClick={() => setShowProfileModal(true)}
+                    className="text-[10px] font-semibold text-blue-400 hover:text-blue-300 transition-colors"
+                  >
+                    {userProfile.profile_complete ? "Edit Profile" : "Complete Profile →"}
+                  </button>
+                </div>
+                {/* Progress bar: count non-null required fields out of 3 */}
+                {(() => {
+                  const requiredFields = [userProfile.full_name, userProfile.email, userProfile.github_username];
+                  const filled = requiredFields.filter(Boolean).length;
+                  return (
+                    <>
+                      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                        <div
+                          className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-500"
+                          style={{ width: `${(filled / 3) * 100}%` }}
+                        />
+                      </div>
+                      <p className="mt-1.5 text-[10px] text-zinc-500">
+                        Profile{" "}
+                        <span className="font-bold text-zinc-300">{filled}/3</span>{" "}
+                        required fields complete
+                        {userProfile.profile_complete && (
+                          <span className="ml-1.5 text-emerald-400">✓ Ready</span>
+                        )}
+                      </p>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
             {/* Profile README Section */}
             {loading && !profile ? (
               <div className="rounded-xl border border-zinc-900 bg-zinc-900/20 p-6 animate-pulse space-y-3">
@@ -935,21 +1086,47 @@ export default function DashboardPage() {
                   {repositories.length} public projects
                 </span>
                 {selectedRepoIds.length > 0 && (
-                  <button
-                    onClick={async () => {
-                      setStatusMessage(`Triggering batch analysis for ${selectedRepoIds.length} repositories...`);
-                      for (const id of selectedRepoIds) {
-                        const targetRepo = repositories.find(r => r.id === id);
-                        if (targetRepo && targetRepo.analysis_status !== "analyzing") {
-                          await handleAnalyze(id);
+                  <div className="flex items-center gap-2">
+                    {/* Analyze Selected */}
+                    <button
+                      onClick={async () => {
+                        setStatusMessage(`Triggering batch analysis for ${selectedRepoIds.length} repositories...`);
+                        for (const id of selectedRepoIds) {
+                          const targetRepo = repositories.find(r => r.id === id);
+                          if (targetRepo && targetRepo.analysis_status !== "analyzing") {
+                            await handleAnalyze(id);
+                          }
                         }
-                      }
-                      setStatusMessage("");
-                    }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold transition-all shadow-[0_0_10px_rgba(37,99,235,0.2)]"
-                  >
-                    Analyze Selected ({selectedRepoIds.length}/3)
-                  </button>
+                        setStatusMessage("");
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold transition-all border border-zinc-700"
+                    >
+                      Analyze Selected ({selectedRepoIds.length}/3)
+                    </button>
+
+                    {/* Build Combined Resume - only when ALL selected repos are complete */}
+                    {selectedRepoIds.every(id =>
+                      repositories.find(r => r.id === id)?.analysis_status === "complete"
+                    ) && (
+                      <button
+                        onClick={handleBuildResume}
+                        disabled={buildingResume}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 disabled:opacity-60 text-white text-xs font-bold transition-all shadow-[0_0_12px_rgba(139,92,246,0.3)]"
+                      >
+                        {buildingResume ? (
+                          <>
+                            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+                            Building...
+                          </>
+                        ) : (
+                          <>
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                            Build Combined Resume ({selectedRepoIds.length})
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -1301,6 +1478,18 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* Profile Completion Modal — shown when user clicks Complete Profile or from resume status page */}
+      <ProfileCompletionModal
+        isOpen={showProfileModal}
+        jobId={resumeJobId || ""}
+        jobType="multi"
+        onSuccess={() => {
+          setShowProfileModal(false);
+          fetchUserProfile();
+        }}
+        onClose={() => setShowProfileModal(false)}
+      />
     </div>
   );
 }

@@ -235,3 +235,21 @@ This document tracks every commit made during the development of the **RepoProof
     *   Compiled the official, professional 13-section `README.md` at the project root using live telemetry.
 
 
+### Commit 20: Phase 11 Multi-Repo Resume and Profile Clarification Gate
+*   **Hash**: `f3092c1`
+*   **Timestamp**: 2026-07-07 11:45:00 UTC+5:30
+*   **Message**: `feat: implement multi-repo resume pipeline, extended profile clarification gate, and dashboard build flows`
+*   **Description**:
+    *   Added 10 personal profile fields (`full_name`, `phone`, `college`, `cgpa`, etc.) to the `User` model in `models.py` and created the `MultiRepoJob` table to track combined resume generation.
+    *   Created Alembic migration `f7a92c1b3e04` containing DDL schemas for the new columns and tables.
+    *   Extended `AnalysisState` TypedDict to support `personal_context` and `missing_fields` inside `analysis_graph.py`.
+    *   Rewrote `check_missing_context_node` to validate all 10 profile fields, automatically auto-filling details from GitHub Redis profile caches.
+    *   Implemented the multi-repository resume LangGraph pipeline (`multi_repo_graph`) executing merged facts loading, personal context validation, string-level claim deduplication, LaTeX generation with self-healing, and MinIO storage upload.
+    *   Exposed Celery tasks `run_multi_repo_resume_task` and `resume_multi_repo_resume_task` to run the multi-repo graph.
+    *   Implemented REST endpoints in `main.py` including `POST /users/me/resume`, `GET /users/me/resume/{job_id}`, `GET /users/me/resumes`, and `POST /users/me/resume/clarify/{job_id}`, plus user profile endpoints.
+    *   Built the frontend `ProfileCompletionModal` component to display and edit all 10 personal profile fields with auto-detected badges.
+    *   Updated the frontend dashboard to support the profile completeness indicator, select checkboxes, and the "Build Combined Resume" modal/trigger flow.
+    *   Created the new multi-repo resume status and progress tracking page under `/dashboard/resume/[jobId]`.
+
+
+

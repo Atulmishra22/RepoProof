@@ -38,19 +38,45 @@ export function PostgresAdapter(): Adapter {
     },
 
     async getUserByEmail(email: string) {
-      const res = await dbPool.query(
+      // First try exact email match
+      let res = await dbPool.query(
         `SELECT id, email, "emailVerified", image, name FROM users WHERE email = $1`,
         [email]
       );
-      if (res.rows.length === 0) return null;
-      const row = res.rows[0];
-      return {
-        id: row.id.toString(),
-        email: row.email,
-        emailVerified: row.emailVerified,
-        image: row.image,
-        name: row.name,
-      };
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        return {
+          id: row.id.toString(),
+          email: row.email,
+          emailVerified: row.emailVerified,
+          image: row.image,
+          name: row.name,
+        };
+      }
+
+      // If no exact match and email is noreply (GitHub), extract username and search by that
+      if (email.includes("@users.noreply.github.com")) {
+        const githubUsername = email.split("@")[0];
+        res = await dbPool.query(
+          `SELECT id, email, "emailVerified", image, name FROM users WHERE github_username = $1`,
+          [githubUsername]
+        );
+        if (res.rows.length > 0) {
+          const row = res.rows[0];
+          console.log(
+            `[AUTH-ADAPTER] Found user by github_username (${githubUsername}), merging OAuth account`
+          );
+          return {
+            id: row.id.toString(),
+            email: row.email,
+            emailVerified: row.emailVerified,
+            image: row.image,
+            name: row.name,
+          };
+        }
+      }
+
+      return null;
     },
 
     async getUserByAccount({ providerAccountId, provider }: { providerAccountId: string; provider: string }) {

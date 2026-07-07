@@ -113,6 +113,59 @@ class User(Base):
         nullable=True,
         comment="Hashed password for developer credentials login."
     )
+    # --- Personal Profile Fields (used for LaTeX resume generation) ---
+    full_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Full display name for resume header (separate from NextAuth name)."
+    )
+    phone: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Phone number for resume contact line."
+    )
+    location: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="City/Country for resume header, e.g. 'Delhi, India'."
+    )
+    college: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="University or college name for education section."
+    )
+    degree: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Degree and major, e.g. 'BS in Data Science & Applications'."
+    )
+    cgpa: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="CGPA string, e.g. '7.6 / 10'. Stored as string for flexible formatting."
+    )
+    graduation_year: Mapped[Optional[str]] = mapped_column(
+        String(10),
+        nullable=True,
+        comment="Expected or actual graduation year, e.g. '2027'."
+    )
+    linkedin_url: Mapped[Optional[str]] = mapped_column(
+        String(2048),
+        nullable=True,
+        comment="Full LinkedIn profile URL for resume links section."
+    )
+    portfolio_url: Mapped[Optional[str]] = mapped_column(
+        String(2048),
+        nullable=True,
+        comment="Personal portfolio or website URL."
+    )
+    profile_complete: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="True when name+email+target_role are all filled. Used to gate resume generation."
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -157,6 +210,11 @@ class User(Base):
     )
     user_preferences: Mapped[List["UserPreference"]] = relationship(
         "UserPreference",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    multi_repo_jobs: Mapped[List["MultiRepoJob"]] = relationship(
+        "MultiRepoJob",
         back_populates="user",
         cascade="all, delete-orphan"
     )
@@ -902,3 +960,81 @@ class UserPreference(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="user_preferences")
+
+
+class MultiRepoJob(Base):
+    """
+    Tracks multi-repository resume generation jobs.
+    Each job merges approved facts from up to 3 analyzed repos into a unified LaTeX PDF.
+    """
+    __tablename__ = "multi_repo_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        comment="Primary key for the combined resume generation job."
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="Owner of this job. Cascade deletes with user."
+    )
+    repo_ids: Mapped[List[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        comment="List of up to 3 repository UUIDs whose approved facts are merged."
+    )
+    job_status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus, name="job_status_enum", create_constraint=False),
+        nullable=False,
+        default=JobStatus.QUEUED,
+        server_default="queued",
+        comment="Current pipeline status of this multi-repo resume job."
+    )
+    output_pdf_key: Mapped[Optional[str]] = mapped_column(
+        String(2048),
+        nullable=True,
+        comment="MinIO object key for the generated combined resume PDF."
+    )
+    output_tex_key: Mapped[Optional[str]] = mapped_column(
+        String(2048),
+        nullable=True,
+        comment="MinIO object key for the generated combined resume .tex source."
+    )
+    personal_context: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Snapshot of user personal profile fields at the time of generation."
+    )
+    missing_fields: Mapped[Optional[List[str]]] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Fields that were missing and prompted clarification, e.g. ['college', 'phone']."
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+        comment="LaTeX compiler error or pipeline failure message."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        comment="Job creation timestamp."
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=datetime.utcnow,
+        comment="Last status update timestamp."
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="multi_repo_jobs")

@@ -926,6 +926,18 @@ import asyncio
 
 logger = structlog.get_logger(__name__)
 
+# Helper to convert internal MinIO URLs to external/public URLs for browser access
+def convert_to_public_minio_url(internal_url: str) -> str:
+    """
+    Convert internal Docker MinIO URL to external accessible URL.
+    Internal: http://minio:9000/bucket/key?params
+    External: http://localhost:9000/bucket/key?params
+    """
+    if not internal_url:
+        return internal_url
+    # Replace internal minio service name with localhost for browser access
+    return internal_url.replace("http://minio:9000", "http://localhost:9000")
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -1041,6 +1053,15 @@ async def update_facts_and_resume(
 class ClarificationPayload(BaseModel):
     email: str
     target_role: str
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    location: Optional[str] = None
+    college: Optional[str] = None
+    degree: Optional[str] = None
+    cgpa: Optional[str] = None
+    graduation_year: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    portfolio_url: Optional[str] = None
 
 @router.post("/reviews/{job_id}/clarify", tags=["analysis"])
 async def clarify_missing_context(
@@ -1050,8 +1071,9 @@ async def clarify_missing_context(
 ):
     """
     POST /api/v1/reviews/{job_id}/clarify
-    Responds to the Clarification Gate by saving contact details (email) and target role,
-    and resumes the workflow.
+    Responds to the Clarification Gate by saving all profile fields (email, target_role, and
+    optional: full_name, phone, location, college, degree, cgpa, graduation_year, linkedin_url,
+    portfolio_url), and resumes the workflow.
     """
     job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
     if not job:
@@ -1059,29 +1081,70 @@ async def clarify_missing_context(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Analysis job not found."
         )
-        
+
     from app.models import User
     user = db.query(User).filter(User.id == job.user_id).first()
     if user:
         user.email = payload.email
+        if payload.full_name:
+            user.full_name = payload.full_name
+        if payload.phone:
+            user.phone = payload.phone
+        if payload.location:
+            user.location = payload.location
+        if payload.college:
+            user.college = payload.college
+        if payload.degree:
+            user.degree = payload.degree
+        if payload.cgpa:
+            user.cgpa = payload.cgpa
+        if payload.graduation_year:
+            user.graduation_year = payload.graduation_year
+        if payload.linkedin_url:
+            user.linkedin_url = payload.linkedin_url
+        if payload.portfolio_url:
+            user.portfolio_url = payload.portfolio_url
+        # Recompute profile_complete flag
+        if user.email and user.full_name and payload.target_role:
+            user.profile_complete = True
         db.commit()
+        db.refresh(user)
+
+    # Build full personal_context from the merged payload + user row
+    personal_context = {
+        "full_name": payload.full_name or (user.full_name if user else "") or "",
+        "email": payload.email,
+        "phone": payload.phone or (user.phone if user else "") or "",
+        "location": payload.location or (user.location if user else "") or "",
+        "college": payload.college or (user.college if user else "") or "",
+        "degree": payload.degree or (user.degree if user else "") or "",
+        "cgpa": payload.cgpa or (user.cgpa if user else "") or "",
+        "graduation_year": payload.graduation_year or (user.graduation_year if user else "") or "",
+        "linkedin_url": payload.linkedin_url or (user.linkedin_url if user else "") or "",
+        "portfolio_url": payload.portfolio_url or (user.portfolio_url if user else "") or "",
+        "target_role": payload.target_role,
+    }
 
     from app.analysis_graph import analysis_graph
     try:
         config = {"configurable": {"thread_id": job_id}}
-        # Update graph state with the target role and resolve clarification flag
+        # Update graph state with full personal_context and resolve clarification flag
         analysis_graph.update_state(
             config,
-            {"target_role": payload.target_role, "needs_clarification": False},
+            {
+                "target_role": payload.target_role,
+                "needs_clarification": False,
+                "personal_context": personal_context,
+            },
             as_node="await_clarification"
         )
-        
+
         # Resume the workflow via Celery
         from app.tasks import resume_analysis_workflow_task
         from app.logging_config import log_context
         trace_id = log_context.get().get("trace_id")
         resume_analysis_workflow_task.delay(str(job.id), None, trace_id=trace_id)
-        
+
         return {
             "status": "success",
             "message": "Clarification provided successfully. Analysis resuming."
@@ -1361,6 +1424,8 @@ async def download_output_file(
             Params={'Bucket': bucket_name, 'Key': object_key},
             ExpiresIn=expires_in_seconds
         )
+        # Convert internal Docker URL to external URL for browser access
+        presigned_url = convert_to_public_minio_url(presigned_url)
     except Exception as s3_err:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1519,6 +1584,8 @@ async def export_outputs_zip(
             Params={'Bucket': bucket_name, 'Key': zip_key},
             ExpiresIn=expires_in_seconds
         )
+        # Convert internal Docker URL to external URL for browser access
+        presigned_url = convert_to_public_minio_url(presigned_url)
     except Exception as s3_err:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1558,6 +1625,7 @@ async def get_auth_me(
         "name": user.name,
         "image": user.image,
         "github_username": user.github_username,
+        "auth_provider": user.auth_provider,
         "subscription_tier": user.subscription_tier.value if hasattr(user.subscription_tier, 'value') else user.subscription_tier,
         "is_active": user.is_active,
         "created_at": user.created_at.isoformat() if user.created_at else None
@@ -1655,6 +1723,287 @@ async def update_user_profile(
             "subscription_tier": user.subscription_tier.value if hasattr(user.subscription_tier, 'value') else user.subscription_tier
         }
     }
+
+
+# ==========================================
+# Phase: User Profile + Multi-Repo Resume Endpoints
+# ==========================================
+
+@router.get("/users/me/profile", tags=["users"])
+async def get_user_profile(
+    current_user: User = Depends(get_current_user)
+):
+    """GET /api/v1/users/me/profile — Return personal profile fields for the resume form."""
+    return {
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "phone": current_user.phone,
+        "location": current_user.location,
+        "college": current_user.college,
+        "degree": current_user.degree,
+        "cgpa": current_user.cgpa,
+        "graduation_year": current_user.graduation_year,
+        "linkedin_url": current_user.linkedin_url,
+        "portfolio_url": current_user.portfolio_url,
+        "github_username": current_user.github_username,
+        "profile_complete": current_user.profile_complete,
+    }
+
+
+class ProfileUpdatePayload(BaseModel):
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    location: Optional[str] = None
+    college: Optional[str] = None
+    degree: Optional[str] = None
+    cgpa: Optional[str] = None
+    graduation_year: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    portfolio_url: Optional[str] = None
+
+
+@router.patch("/users/me/profile", tags=["users"])
+async def update_user_profile(
+    payload: ProfileUpdatePayload,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """PATCH /api/v1/users/me/profile — Update personal profile fields for resume."""
+    for field, value in payload.model_dump(exclude_none=True).items():
+        setattr(current_user, field, value)
+    # Recompute profile_complete
+    current_user.profile_complete = bool(
+        current_user.full_name and current_user.email
+    )
+    current_user.updated_at = datetime.utcnow()
+    db.commit()
+    return {"status": "updated", "profile_complete": current_user.profile_complete}
+
+
+class MultiResumeRequest(BaseModel):
+    repo_ids: List[str]  # 1-3 repo UUIDs
+
+
+@router.post("/users/me/resume", tags=["resume"])
+async def create_multi_repo_resume(
+    payload: MultiResumeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    POST /api/v1/users/me/resume
+    Queue a multi-repo combined LaTeX resume generation job.
+    """
+    if not payload.repo_ids or len(payload.repo_ids) > 3:
+        raise HTTPException(400, "Must provide 1-3 repository IDs.")
+
+    # Validate all repos exist and belong to current user
+    from app.models import MultiRepoJob
+    repos = []
+    for repo_id in payload.repo_ids:
+        repo = db.query(Repository).filter(
+            Repository.id == repo_id,
+            Repository.user_id == current_user.id
+        ).first()
+        if not repo:
+            raise HTTPException(404, f"Repository {repo_id} not found or not owned by you.")
+        if repo.analysis_status != AnalysisStatus.COMPLETE:
+            raise HTTPException(
+                400,
+                f"Repository {repo.name} has not completed analysis yet. Please analyze it first."
+            )
+        repos.append(repo)
+
+    # Create MultiRepoJob
+    multi_job = MultiRepoJob(
+        user_id=current_user.id,
+        repo_ids=[str(r.id) for r in repos],
+        job_status=JobStatus.QUEUED
+    )
+    db.add(multi_job)
+    db.commit()
+    db.refresh(multi_job)
+
+    # Queue Celery task
+    from app.tasks import run_multi_repo_resume_task
+    from app.logging_config import log_context
+    trace_id = log_context.get().get("trace_id")
+    run_multi_repo_resume_task.delay(str(multi_job.id), trace_id=trace_id)
+
+    return {
+        "job_id": str(multi_job.id),
+        "status": "queued",
+        "repo_count": len(repos),
+        "message": "Multi-repo resume generation queued. Poll /users/me/resume/{job_id} for status."
+    }
+
+
+@router.get("/users/me/resume/{job_id}", tags=["resume"])
+async def get_multi_resume_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    GET /api/v1/users/me/resume/{job_id}
+    Get status and download URL for a multi-repo resume job.
+    """
+    from app.models import MultiRepoJob
+    job = db.query(MultiRepoJob).filter(
+        MultiRepoJob.id == job_id,
+        MultiRepoJob.user_id == current_user.id
+    ).first()
+    if not job:
+        raise HTTPException(404, "Resume job not found.")
+
+    presigned_url = None
+    if job.job_status == JobStatus.COMPLETE and job.output_pdf_key:
+        try:
+            from app.analysis_graph import get_s3_client
+            s3 = get_s3_client()
+            presigned_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": "repoproof-data", "Key": job.output_pdf_key},
+                ExpiresIn=3600
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL for multi-resume job {job_id}: {e}")
+
+    return {
+        "job_id": str(job.id),
+        "status": job.job_status.value,
+        "repo_ids": job.repo_ids,
+        "missing_fields": job.missing_fields or [],
+        "needs_clarification": job.job_status == JobStatus.INTERRUPTED,
+        "personal_context": job.personal_context or {},
+        "presigned_url": presigned_url,
+        "error_message": job.error_message,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+    }
+
+
+@router.post("/users/me/resume/clarify/{job_id}", tags=["resume"])
+async def clarify_multi_missing_context(
+    job_id: str,
+    payload: ClarificationPayload,
+    db: Session = Depends(get_db)
+):
+    """
+    POST /api/v1/users/me/resume/clarify/{job_id}
+    Responds to the Clarification Gate for a multi-repo job by saving all profile fields,
+    and resumes the workflow.
+    """
+    from app.models import MultiRepoJob
+    import uuid as _uuid
+    try:
+        jid = _uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job ID format.")
+
+    job = db.query(MultiRepoJob).filter(MultiRepoJob.id == jid).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resume job not found."
+        )
+
+    from app.models import User
+    user = db.query(User).filter(User.id == job.user_id).first()
+    if user:
+        user.email = payload.email
+        if payload.full_name:
+            user.full_name = payload.full_name
+        if payload.phone:
+            user.phone = payload.phone
+        if payload.location:
+            user.location = payload.location
+        if payload.college:
+            user.college = payload.college
+        if payload.degree:
+            user.degree = payload.degree
+        if payload.cgpa:
+            user.cgpa = payload.cgpa
+        if payload.graduation_year:
+            user.graduation_year = payload.graduation_year
+        if payload.linkedin_url:
+            user.linkedin_url = payload.linkedin_url
+        if payload.portfolio_url:
+            user.portfolio_url = payload.portfolio_url
+        # Recompute profile_complete flag
+        if user.email and user.full_name and payload.target_role:
+            user.profile_complete = True
+        db.commit()
+        db.refresh(user)
+
+    # Build full personal_context
+    personal_context = {
+        "full_name": payload.full_name or (user.full_name if user else "") or "",
+        "email": payload.email,
+        "phone": payload.phone or (user.phone if user else "") or "",
+        "location": payload.location or (user.location if user else "") or "",
+        "college": payload.college or (user.college if user else "") or "",
+        "degree": payload.degree or (user.degree if user else "") or "",
+        "cgpa": payload.cgpa or (user.cgpa if user else "") or "",
+        "graduation_year": payload.graduation_year or (user.graduation_year if user else "") or "",
+        "linkedin_url": payload.linkedin_url or (user.linkedin_url if user else "") or "",
+        "portfolio_url": payload.portfolio_url or (user.portfolio_url if user else "") or "",
+        "target_role": payload.target_role,
+    }
+
+    from app.analysis_graph import multi_repo_graph
+    try:
+        config = {"configurable": {"thread_id": job_id}}
+        # Update graph state with full personal_context and resolve clarification flag
+        multi_repo_graph.update_state(
+            config,
+            {
+                "needs_clarification": False,
+                "personal_context": personal_context,
+            },
+            as_node="await_multi_clarification"
+        )
+
+        # Resume the workflow via Celery
+        from app.tasks import resume_multi_repo_resume_task
+        from app.logging_config import log_context
+        trace_id = log_context.get().get("trace_id")
+        resume_multi_repo_resume_task.delay(str(job.id), trace_id=trace_id)
+
+        return {
+            "status": "success",
+            "message": "Clarification provided successfully. Resume generation resuming."
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to provide clarification and resume: {str(e)}"
+        )
+
+
+@router.get("/users/me/resumes", tags=["resume"])
+async def list_multi_resumes(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """GET /api/v1/users/me/resumes — List all multi-repo resume jobs for current user."""
+    from app.models import MultiRepoJob
+    jobs = (
+        db.query(MultiRepoJob)
+        .filter(MultiRepoJob.user_id == current_user.id)
+        .order_by(MultiRepoJob.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    return [
+        {
+            "job_id": str(j.id),
+            "status": j.job_status.value,
+            "repo_ids": j.repo_ids,
+            "created_at": j.created_at.isoformat(),
+        }
+        for j in jobs
+    ]
 
 
 @app.get("/metrics", tags=["monitoring"])

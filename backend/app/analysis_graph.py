@@ -102,6 +102,8 @@ class AnalysisState(TypedDict):
     error: Optional[str]
     target_role: Optional[str]
     needs_clarification: Optional[bool]
+    personal_context: Optional[Dict[str, Any]]   # full name, phone, location, college, degree, cgpa, graduation_year, linkedin_url, portfolio_url, target_role, email
+    missing_fields: Optional[List[str]]            # which required fields are still missing
 
 # MinIO storage helper
 def get_s3_client():
@@ -854,61 +856,95 @@ def await_human_review_node(state: AnalysisState, config: Optional[RunnableConfi
 def check_missing_context_node(state: AnalysisState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     if state.get("error"):
         return {}
-        
+
     repo_id = state["repository_id"]
     job_id = None
     if config:
         job_id = config.get("configurable", {}).get("thread_id")
-        
+
+    # --- 1. Load User from DB via repo.user_id ---
     db = SessionLocal()
-    user_email = ""
-    target_role = state.get("target_role")
-    
-    # Query user details
+    user = None
+    repo = None
     try:
         repo = db.query(Repository).filter(Repository.id == repo_id).first()
         if repo:
             from app.models import User
             user = db.query(User).filter(User.id == repo.user_id).first()
-            if user:
-                user_email = user.email or ""
     except Exception as e:
-        logger.error(f"Error checking context details: {e}")
+        logger.error(f"Error loading user for clarification gate: {e}")
     finally:
         db.close()
-        
-    # Validation check: must have a valid email and target role
-    has_email = bool(user_email and "@" in user_email)
-    
-    if not target_role or not target_role.strip():
-        try:
-            repo = db.query(Repository).filter(Repository.id == repo_id).first()
-            if repo:
-                from app.models import User
-                user = db.query(User).filter(User.id == repo.user_id).first()
-                if user and user.github_username:
-                    import redis
-                    from app.redis_client import redis_client
-                    cached_profile = redis_client.get(f"github_profile:{user.github_username}")
-                    if cached_profile:
-                        profile_data = json.loads(cached_profile)
-                        bio = profile_data.get("bio", "")
-                        if bio and len(bio.strip()) > 3:
-                            target_role = bio.strip()
-        except Exception as e:
-            logger.error(f"Error resolving fallback target_role: {e}")
-            
-        if not target_role or not target_role.strip():
-            target_role = "Full Stack Software Engineer"
-            
-        # Update state dictionary directly (we will return it to propagate)
-        state["target_role"] = target_role
 
-    has_role = bool(target_role and target_role.strip())
-    
-    if not has_email or not has_role:
-        logger.warning(f"Clarification Gate failed. Has email: {has_email}, Has role: {has_role}. Pausing workflow.")
-        # Update job status in database to AWAITING_CLARIFICATION
+    # --- 2. Try to auto-fill name/location/bio from GitHub Redis cache ---
+    profile_data: Dict[str, Any] = {}
+    if user and user.github_username:
+        try:
+            from app.redis_client import redis_client
+            cached_profile = redis_client.get(f"github_profile:{user.github_username}")
+            if cached_profile:
+                profile_data = json.loads(cached_profile)
+        except Exception as redis_err:
+            logger.warning(f"Failed to fetch GitHub profile from Redis: {redis_err}")
+
+    # --- 3. Build personal_context dict (11 fields) ---
+    # Resolve target_role: state first, then Redis bio, then keep None (required)
+    target_role = (
+        state.get("target_role")
+        or profile_data.get("bio", "").strip() or None
+    )
+
+    personal_context: Dict[str, Any] = {
+        "full_name": (
+            (user.full_name if user else None)
+            or profile_data.get("name")
+            or (user.name if user else None)
+            or ""
+        ),
+        "email": (user.email if user else "") or "",
+        "phone": (user.phone if user else "") or "",
+        "location": (
+            (user.location if user else None)
+            or profile_data.get("location")
+            or ""
+        ),
+        "college": (user.college if user else "") or "",
+        "degree": (user.degree if user else "") or "",
+        "cgpa": (user.cgpa if user else "") or "",
+        "graduation_year": (user.graduation_year if user else "") or "",
+        "linkedin_url": (user.linkedin_url if user else "") or "",
+        "portfolio_url": (
+            (user.portfolio_url if user else None)
+            or profile_data.get("blog")
+            or ""
+        ),
+        "target_role": target_role or "",
+    }
+
+    # Merge with any existing personal_context already in state (from prior clarification)
+    existing_ctx = state.get("personal_context") or {}
+    for key, val in existing_ctx.items():
+        if val and not personal_context.get(key):
+            personal_context[key] = val
+
+    # --- 4. Compute missing REQUIRED fields only ---
+    required_fields = ["full_name", "email", "target_role"]
+    missing_fields: List[str] = [
+        f for f in required_fields
+        if not personal_context.get(f) or not str(personal_context[f]).strip()
+    ]
+
+    # Validate email format
+    email_val = personal_context.get("email", "")
+    if email_val and "@" not in email_val:
+        if "email" not in missing_fields:
+            missing_fields.append("email")
+
+    # --- 5. If missing required fields → interrupt ---
+    if missing_fields:
+        logger.warning(
+            f"Clarification Gate failed. Missing required fields: {missing_fields}. Pausing workflow."
+        )
         if job_id:
             db = SessionLocal()
             try:
@@ -922,17 +958,22 @@ def check_missing_context_node(state: AnalysisState, config: Optional[RunnableCo
                 logger.error(f"Failed to update job to awaiting clarification: {db_err}")
             finally:
                 db.close()
-                
+
         return {
             "needs_clarification": True,
-            "status": "awaiting_clarification"
+            "missing_fields": missing_fields,
+            "personal_context": personal_context,
+            "status": "awaiting_clarification",
         }
-        
+
+    # --- 6. All required fields present → pass through ---
     logger.info("Clarification Gate passed. Continuing to document compilation.")
     return {
-        "target_role": target_role,
+        "target_role": personal_context["target_role"],
         "needs_clarification": False,
-        "status": "clarification_passed"
+        "missing_fields": [],
+        "personal_context": personal_context,
+        "status": "clarification_passed",
     }
 
 
@@ -1003,6 +1044,14 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
 
     # If no user_id found, use a fallback
     user_id_str = str(user_id) if user_id else "system"
+
+    # Enrich from personal_context if it was already built by the clarification gate
+    personal_context = state.get("personal_context") or {}
+    if personal_context:
+        user_name = personal_context.get("full_name") or user_name
+        user_email = personal_context.get("email") or user_email
+        bio = personal_context.get("target_role") or bio  # use target_role as headline
+
 
     # Helper for LLM Calls
     def call_llm(messages: List[Dict[str, str]], schema: Any) -> Dict[str, Any]:
@@ -1094,8 +1143,9 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
                 "Step 2: LaTeX Code Generation\n"
                 "Generate a complete, compilation-ready LaTeX resume using standard packages (like fullpage, titlesec, enumitem, hyperref, geometry).\n"
                 "Guidelines:\n"
-                "- Name: [NAME], Email: [EMAIL], GitHub: [GITHUB], LinkedIn: [LINKEDIN]\n"
                 "- Strictly limit the length to EXACTLY one page. Reduce spacing, margins (e.g. \\addtolength{\\oddsidemargin}{-0.5in}, \\addtolength{\\topmargin}{-0.5in}), and item spacing to guarantee a single-page budget.\n"
+                "- Contact Header: Include Phone and Location if provided (not 'N/A').\n"
+                "- Education Section: Include University/College, Degree, CGPA, Graduation Year if provided (N/A means omit that field).\n"
                 "- Write out the LaTeX code inside the json field `latex_code`.\n"
                 "- Do NOT escape LaTeX characters in the JSON output (e.g. write \\section, not \\\\section, but make sure to escape special characters in LaTeX text properly like \\% for percent, \\& for ampersand, and \\_ for underscores)."
             )
@@ -1103,11 +1153,18 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
         {
             "role": "user",
             "content": (
-                f"Candidate Name: {user_name}\n"
-                f"Candidate Email: {user_email}\n"
-                f"GitHub Link: github.com/{github_username}\n"
-                f"LinkedIn Link: linkedin.com/in/{github_username}\n"
-                f"Brief Bio: {bio}\n\n"
+                f"Candidate Name: {personal_context.get('full_name') or user_name}\n"
+                f"Candidate Email: {personal_context.get('email') or user_email}\n"
+                f"Phone: {personal_context.get('phone') or 'N/A'}\n"
+                f"Location: {personal_context.get('location') or 'N/A'}\n"
+                f"College/University: {personal_context.get('college') or 'N/A'}\n"
+                f"Degree: {personal_context.get('degree') or 'N/A'}\n"
+                f"CGPA: {personal_context.get('cgpa') or 'N/A'}\n"
+                f"Graduation Year: {personal_context.get('graduation_year') or 'N/A'}\n"
+                f"GitHub: github.com/{github_username}\n"
+                f"LinkedIn: {personal_context.get('linkedin_url') or f'linkedin.com/in/{github_username}'}\n"
+                f"Portfolio: {personal_context.get('portfolio_url') or 'N/A'}\n"
+                f"Target Role: {personal_context.get('target_role') or bio or 'Software Engineer'}\n\n"
                 f"Approved Technical Facts:\n{facts_str}"
             )
         }
@@ -1426,7 +1483,516 @@ def compile_documents_node(state: AnalysisState, config: Optional[RunnableConfig
         "status": "documents_compiled"
     }
 
+# =============================================================================
+# Phase 3: Multi-Repo Resume LangGraph Pipeline
+# =============================================================================
+
+class MultiRepoState(TypedDict):
+    multi_job_id: str
+    user_id: str
+    repo_ids: List[str]
+    merged_facts: List[Dict[str, Any]]   # deduplicated facts from all repos, tagged with repo_name
+    personal_context: Dict[str, Any]
+    missing_fields: List[str]
+    needs_clarification: bool
+    latex_code: Optional[str]
+    pdf_bytes: Optional[bytes]
+    status: str
+    error: Optional[str]
+    llm_tokens_used: int
+    llm_cost_usd: float
+
+
+def load_merged_facts_node(state: MultiRepoState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Loads approved CodeFact rows for each repo_id and tags each with repo_name."""
+    multi_job_id = state["multi_job_id"]
+    repo_ids = state.get("repo_ids", [])
+    logger.info(f"Loading merged facts for multi-repo job {multi_job_id}, repos: {repo_ids}")
+
+    db = SessionLocal()
+    all_facts: List[Dict[str, Any]] = []
+    try:
+        from app.models import MultiRepoJob, CodeFact, AnalysisJob
+        for repo_id_str in repo_ids:
+            import uuid as _uuid
+            try:
+                rid = _uuid.UUID(repo_id_str)
+            except ValueError:
+                logger.warning(f"Invalid repo_id UUID: {repo_id_str}")
+                continue
+
+            repo = db.query(Repository).filter(Repository.id == rid).first()
+            if not repo:
+                logger.warning(f"Repository {repo_id_str} not found, skipping.")
+                continue
+
+            # Load the latest completed analysis job for this repo
+            job = (
+                db.query(AnalysisJob)
+                .filter(
+                    AnalysisJob.repository_id == rid,
+                    AnalysisJob.status == JobStatus.COMPLETE
+                )
+                .order_by(AnalysisJob.created_at.desc())
+                .first()
+            )
+            if not job:
+                logger.warning(f"No completed AnalysisJob for repo {repo.name}, skipping facts.")
+                continue
+
+            facts = db.query(CodeFact).filter(
+                CodeFact.analysis_job_id == job.id,
+                CodeFact.is_human_approved == True
+            ).all()
+
+            for f in facts:
+                all_facts.append({
+                    "id": str(f.id),
+                    "repo_name": repo.name,
+                    "category": f.category,
+                    "claim": f.claim,
+                    "source_file": f.source_file,
+                    "snippet": f.snippet,
+                    "ats_impact": f.ats_impact,
+                    "is_validated": f.is_validated,
+                    "is_human_approved": f.is_human_approved,
+                })
+
+        logger.info(f"Loaded {len(all_facts)} approved facts across {len(repo_ids)} repos.")
+        return {"merged_facts": all_facts, "status": "facts_loaded"}
+    except Exception as e:
+        logger.exception(f"Error in load_merged_facts_node: {e}")
+        return {"merged_facts": [], "status": "failed", "error": str(e)}
+    finally:
+        db.close()
+
+
+def check_personal_context_node(state: MultiRepoState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Builds personal_context from User DB + GitHub Redis cache. Interrupts if required fields missing."""
+    user_id_str = state["user_id"]
+    multi_job_id = state["multi_job_id"]
+    logger.info(f"Checking personal context for multi-repo job {multi_job_id}, user {user_id_str}")
+
+    db = SessionLocal()
+    user = None
+    try:
+        import uuid as _uuid
+        from app.models import User
+        user = db.query(User).filter(User.id == _uuid.UUID(user_id_str)).first()
+    except Exception as e:
+        logger.error(f"Error loading user {user_id_str}: {e}")
+    finally:
+        db.close()
+
+    # Auto-fill from GitHub Redis cache
+    profile_data: Dict[str, Any] = {}
+    if user and user.github_username:
+        try:
+            from app.redis_client import redis_client
+            cached = redis_client.get(f"github_profile:{user.github_username}")
+            if cached:
+                profile_data = json.loads(cached)
+        except Exception as redis_err:
+            logger.warning(f"Failed to fetch GitHub profile from Redis: {redis_err}")
+
+    # Resolve target_role
+    target_role = profile_data.get("bio", "").strip() or None
+
+    # Build personal_context (same 11 fields as single-repo gate)
+    personal_context: Dict[str, Any] = {
+        "full_name": (
+            (user.full_name if user else None)
+            or profile_data.get("name")
+            or (user.name if user else None)
+            or ""
+        ),
+        "email": (user.email if user else "") or "",
+        "phone": (user.phone if user else "") or "",
+        "location": (
+            (user.location if user else None)
+            or profile_data.get("location")
+            or ""
+        ),
+        "college": (user.college if user else "") or "",
+        "degree": (user.degree if user else "") or "",
+        "cgpa": (user.cgpa if user else "") or "",
+        "graduation_year": (user.graduation_year if user else "") or "",
+        "linkedin_url": (user.linkedin_url if user else "") or "",
+        "portfolio_url": (
+            (user.portfolio_url if user else None)
+            or profile_data.get("blog")
+            or ""
+        ),
+        "target_role": target_role or "",
+    }
+
+    # Merge with any already-provided personal_context from state
+    existing_ctx = state.get("personal_context") or {}
+    for key, val in existing_ctx.items():
+        if val and not personal_context.get(key):
+            personal_context[key] = val
+
+    # Validate required fields
+    required_fields = ["full_name", "email", "target_role"]
+    missing_fields: List[str] = [
+        f for f in required_fields
+        if not personal_context.get(f) or not str(personal_context[f]).strip()
+    ]
+    email_val = personal_context.get("email", "")
+    if email_val and "@" not in email_val and "email" not in missing_fields:
+        missing_fields.append("email")
+
+    if missing_fields:
+        logger.warning(f"Multi-repo personal context missing required fields: {missing_fields}")
+        # Update job status to INTERRUPTED
+        db = SessionLocal()
+        try:
+            from app.models import MultiRepoJob
+            import uuid as _uuid
+            job = db.query(MultiRepoJob).filter(MultiRepoJob.id == _uuid.UUID(multi_job_id)).first()
+            if job:
+                job.job_status = JobStatus.INTERRUPTED
+                job.missing_fields = missing_fields
+                job.personal_context = personal_context
+                db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to update MultiRepoJob to INTERRUPTED: {db_err}")
+        finally:
+            db.close()
+
+        return {
+            "needs_clarification": True,
+            "missing_fields": missing_fields,
+            "personal_context": personal_context,
+            "status": "awaiting_clarification",
+        }
+
+    logger.info("Multi-repo personal context check passed.")
+    return {
+        "needs_clarification": False,
+        "missing_fields": [],
+        "personal_context": personal_context,
+        "status": "context_verified",
+    }
+
+
+def await_multi_clarification_node(state: MultiRepoState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Pass-through interrupt node. When resumed, transitions forward."""
+    logger.info("Resuming multi-repo pipeline from clarification gate...")
+    return {"status": "clarification_provided"}
+
+
+def merge_and_deduplicate_node(state: MultiRepoState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Deduplicates merged_facts by claim text (case-insensitive, stripped)."""
+    facts = state.get("merged_facts", [])
+    logger.info(f"Deduplicating {len(facts)} merged facts from multi-repo job...")
+
+    seen_claims: Dict[str, Dict[str, Any]] = {}
+    for fact in facts:
+        claim_key = fact.get("claim", "").strip().lower()
+        if not claim_key:
+            continue
+        if claim_key not in seen_claims:
+            seen_claims[claim_key] = fact
+        else:
+            # Keep the fact with the longer ats_impact string (more descriptive)
+            existing = seen_claims[claim_key]
+            if len(fact.get("ats_impact", "")) > len(existing.get("ats_impact", "")):
+                seen_claims[claim_key] = fact
+
+    deduplicated = list(seen_claims.values())
+    logger.info(f"Deduplicated to {len(deduplicated)} unique facts.")
+    return {"merged_facts": deduplicated, "status": "facts_merged"}
+
+
+def generate_multi_resume_node(state: MultiRepoState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Generates a multi-repo LaTeX resume combining best facts from all repos."""
+    multi_job_id = state["multi_job_id"]
+    user_id_str = state["user_id"]
+    personal_context = state.get("personal_context") or {}
+    merged_facts = state.get("merged_facts", [])
+
+    logger.info(f"Generating multi-repo resume for job {multi_job_id} with {len(merged_facts)} facts...")
+
+    # Group facts by repo_name for structured prompt
+    facts_by_repo: Dict[str, List[Dict[str, Any]]] = {}
+    for fact in merged_facts:
+        repo_name = fact.get("repo_name", "Unknown")
+        facts_by_repo.setdefault(repo_name, []).append(fact)
+
+    # Build prompt sections
+    projects_section = ""
+    for repo_name, repo_facts in facts_by_repo.items():
+        projects_section += f"\n--- Project: {repo_name} ---\n"
+        projects_section += json.dumps(repo_facts[:5], indent=2)  # max 5 facts per repo
+        projects_section += "\n"
+
+    github_username = ""
+    if user_id_str:
+        db = SessionLocal()
+        try:
+            from app.models import User
+            import uuid as _uuid
+            u = db.query(User).filter(User.id == _uuid.UUID(user_id_str)).first()
+            if u:
+                github_username = u.github_username or ""
+        except Exception:
+            pass
+        finally:
+            db.close()
+
+    system_prompt = (
+        "You are an expert LaTeX resume designer. Generate a complete, ATS-optimized LaTeX resume combining the developer's best projects.\n"
+        "Rules:\n"
+        "- Create one \\section{Projects} with subsections, one per project (max 3 bullet points per project from its approved facts)\n"
+        "- Add \\section{Education} using college/degree/CGPA if provided (omit if N/A)\n"
+        "- Add \\section{Skills} merging all unique technologies across all projects\n"
+        "- Header: name, email, phone, location, LinkedIn, GitHub, portfolio (omit any field that is 'N/A')\n"
+        "- STRICT one-page budget: use tight margins (\\addtolength{\\oddsidemargin}{-0.5in}, \\addtolength{\\topmargin}{-0.5in}) and small itemsep\n"
+        "- If a personal field is 'N/A', omit that line entirely\n"
+        "- Do NOT escape LaTeX characters in the JSON output (e.g. write \\section, not \\\\section, but escape special chars in text: \\% \\& \\_)\n"
+        "- Output the complete, compilable LaTeX code in the `latex_code` JSON field."
+    )
+
+    user_message = (
+        f"Candidate Name: {personal_context.get('full_name') or 'N/A'}\n"
+        f"Candidate Email: {personal_context.get('email') or 'N/A'}\n"
+        f"Phone: {personal_context.get('phone') or 'N/A'}\n"
+        f"Location: {personal_context.get('location') or 'N/A'}\n"
+        f"College/University: {personal_context.get('college') or 'N/A'}\n"
+        f"Degree: {personal_context.get('degree') or 'N/A'}\n"
+        f"CGPA: {personal_context.get('cgpa') or 'N/A'}\n"
+        f"Graduation Year: {personal_context.get('graduation_year') or 'N/A'}\n"
+        f"GitHub: github.com/{github_username}\n"
+        f"LinkedIn: {personal_context.get('linkedin_url') or f'linkedin.com/in/{github_username}'}\n"
+        f"Portfolio: {personal_context.get('portfolio_url') or 'N/A'}\n"
+        f"Target Role: {personal_context.get('target_role') or 'Software Engineer'}\n\n"
+        f"Projects and Approved Technical Facts (grouped by project):\n{projects_section}"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    # Call LLM via LiteLLM proxy
+    prompt_tokens_used = 0
+    completion_tokens_used = 0
+    latex_code = ""
+    try:
+        response = httpx.post(
+            f"{LITELLM_PROXY_URL}/v1/chat/completions",
+            json={
+                "model": MODEL_NAME,
+                "messages": messages,
+                "temperature": 0.2,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "LaTeXResumeResponse",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "latex_code": {"type": "string"},
+                                "ats_reasoning": {"type": "string"}
+                            },
+                            "required": ["latex_code", "ats_reasoning"],
+                            "additionalProperties": False
+                        },
+                        "strict": True
+                    }
+                }
+            },
+            timeout=180.0
+        )
+        response.raise_for_status()
+        resp_data = response.json()
+        usage = resp_data.get("usage", {})
+        prompt_tokens_used = usage.get("prompt_tokens", 0)
+        completion_tokens_used = usage.get("completion_tokens", 0)
+        content = resp_data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        latex_code = parsed["latex_code"]
+        logger.info(f"Multi-repo LaTeX generated. Tokens: {prompt_tokens_used + completion_tokens_used}")
+    except Exception as llm_err:
+        logger.exception(f"Failed to generate multi-repo LaTeX: {llm_err}")
+        return {"status": "failed", "error": f"LaTeX generation error: {str(llm_err)}"}
+
+    # --- Self-healing compile loop (max 3 retries) ---
+    def _compile_latex_multi(latex_content: str, output_dir: str) -> str:
+        tex_path = os.path.join(output_dir, "resume.tex")
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(latex_content)
+        for _ in range(2):
+            res = subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "resume.tex"],
+                cwd=output_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            if res.returncode != 0:
+                log_path = os.path.join(output_dir, "resume.log")
+                log_tail = ""
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                        log_tail = "".join(lf.readlines()[-30:])
+                raise RuntimeError(f"pdflatex failed (exit {res.returncode}):\n{log_tail}")
+        pdf_path = os.path.join(output_dir, "resume.pdf")
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError("Compiled PDF not found after successful run.")
+        return pdf_path
+
+    compile_success = False
+    error_log = ""
+    retry_count = 0
+    max_retries = 3
+    pdf_bytes = b""
+
+    while not compile_success and retry_count <= max_retries:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                logger.info(f"Multi-repo LaTeX compile attempt {retry_count}...")
+                pdf_path = _compile_latex_multi(latex_code, tmpdir)
+                with open(pdf_path, "rb") as pf:
+                    pdf_bytes = pf.read()
+                compile_success = True
+                logger.info("Multi-repo LaTeX compiled successfully!")
+            except Exception as compile_err:
+                error_log = str(compile_err)
+                logger.warning(f"Multi-repo LaTeX compile attempt {retry_count} failed: {error_log}")
+                if retry_count == max_retries:
+                    break
+                retry_count += 1
+                # Ask LLM to heal
+                try:
+                    logger.info("Invoking AI Self-Healing LLM pass for multi-repo resume...")
+                    heal_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an expert LaTeX compiler and troubleshooter.\n"
+                                "The user is trying to compile a LaTeX resume, but the compilation failed with a pdflatex error.\n"
+                                "Analyze the invalid LaTeX code and the compiler log tail, diagnose the root cause, and output the corrected, complete LaTeX code.\n\n"
+                                "Important guidelines:\n"
+                                "- Do NOT truncate or write partial code. Output the COMPLETE corrected LaTeX source code.\n"
+                                "- Ensure it adheres strictly to a single-page budget."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"--- INVALID LATEX CODE ---\n{latex_code}\n\n"
+                                f"--- COMPILER LOG ERROR ---\n{error_log}\n\n"
+                                "Please output the corrected LaTeX code in the structured JSON response format."
+                            )
+                        }
+                    ]
+                    heal_response = httpx.post(
+                        f"{LITELLM_PROXY_URL}/v1/chat/completions",
+                        json={
+                            "model": MODEL_NAME,
+                            "messages": heal_messages,
+                            "temperature": 0.0,
+                            "response_format": {
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "LaTeXSelfHealingResponse",
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "latex_code": {"type": "string"},
+                                            "diagnosed_cause": {"type": "string"}
+                                        },
+                                        "required": ["latex_code", "diagnosed_cause"],
+                                        "additionalProperties": False
+                                    },
+                                    "strict": True
+                                }
+                            }
+                        },
+                        timeout=120.0
+                    )
+                    heal_response.raise_for_status()
+                    heal_data = heal_response.json()
+                    heal_content = heal_data["choices"][0]["message"]["content"]
+                    heal_parsed = json.loads(heal_content)
+                    latex_code = heal_parsed["latex_code"]
+                    logger.info(f"Self-Healing Diagnosis: {heal_parsed.get('diagnosed_cause', '')}")
+                    prompt_tokens_used += heal_data.get("usage", {}).get("prompt_tokens", 0)
+                    completion_tokens_used += heal_data.get("usage", {}).get("completion_tokens", 0)
+                except Exception as heal_err:
+                    logger.error(f"Failed to run AI Self-Healing LLM pass: {heal_err}")
+                    break
+
+    if not compile_success:
+        logger.error("Multi-repo LaTeX compilation failed after maximum self-healing retries.")
+        return {"status": "failed", "error": f"LaTeX compiler failed: {error_log}"}
+
+    total_cost = (prompt_tokens_used * 0.10 + completion_tokens_used * 0.40) / 1000000.0
+    return {
+        "latex_code": latex_code,
+        "pdf_bytes": pdf_bytes,
+        "status": "latex_generated",
+        "llm_tokens_used": state.get("llm_tokens_used", 0) + prompt_tokens_used + completion_tokens_used,
+        "llm_cost_usd": float(state.get("llm_cost_usd", 0.0)) + total_cost,
+    }
+
+
+def upload_multi_resume_node(state: MultiRepoState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Uploads multi-repo resume PDF + .tex to MinIO and marks MultiRepoJob COMPLETE."""
+    multi_job_id = state["multi_job_id"]
+    user_id_str = state["user_id"]
+    latex_code = state.get("latex_code", "")
+    pdf_bytes = state.get("pdf_bytes", b"")
+
+    if not pdf_bytes:
+        logger.error(f"upload_multi_resume_node: no PDF bytes available for job {multi_job_id}")
+        return {"status": "failed", "error": "No PDF bytes to upload."}
+
+    logger.info(f"Uploading multi-repo resume for job {multi_job_id}...")
+
+    pdf_key = f"multi_resume/{user_id_str}/{multi_job_id}/resume.pdf"
+    tex_key = f"multi_resume/{user_id_str}/{multi_job_id}/resume.tex"
+    bucket_name = "repoproof-data"
+
+    try:
+        s3 = get_s3_client()
+        try:
+            s3.create_bucket(Bucket=bucket_name)
+        except Exception:
+            pass  # Already exists
+        s3.put_object(Bucket=bucket_name, Key=pdf_key, Body=pdf_bytes, ContentType="application/pdf")
+        s3.put_object(Bucket=bucket_name, Key=tex_key, Body=latex_code, ContentType="application/x-tex")
+        logger.info(f"Uploaded multi-repo resume PDF to {pdf_key}")
+    except Exception as upload_err:
+        logger.exception(f"Failed to upload multi-repo resume to MinIO: {upload_err}")
+        return {"status": "failed", "error": f"MinIO upload error: {str(upload_err)}"}
+
+    # Update MultiRepoJob in DB
+    db = SessionLocal()
+    try:
+        from app.models import MultiRepoJob
+        import uuid as _uuid
+        job = db.query(MultiRepoJob).filter(MultiRepoJob.id == _uuid.UUID(multi_job_id)).first()
+        if job:
+            job.job_status = JobStatus.COMPLETE
+            job.output_pdf_key = pdf_key
+            job.output_tex_key = tex_key
+            job.personal_context = state.get("personal_context") or {}
+            db.commit()
+            logger.info(f"MultiRepoJob {multi_job_id} marked COMPLETE.")
+    except Exception as db_err:
+        logger.error(f"Failed to update MultiRepoJob to COMPLETE: {db_err}")
+        db.rollback()
+    finally:
+        db.close()
+
+    return {"status": "complete"}
+
+
 # Build LangGraph Workflow
+
 workflow = StateGraph(AnalysisState)
 
 workflow.add_node("clone_repo", clone_repo_node)
@@ -1478,6 +2044,44 @@ except Exception as e:
         interrupt_before=["await_human_review", "await_clarification"]
     )  # Fallback to no checkpointer for compiling safety
 
+
+# --- Multi-Repo Resume Graph ---
+multi_workflow = StateGraph(MultiRepoState)
+multi_workflow.add_node("load_merged_facts", load_merged_facts_node)
+multi_workflow.add_node("check_personal_context", check_personal_context_node)
+multi_workflow.add_node("await_multi_clarification", await_multi_clarification_node)
+multi_workflow.add_node("merge_and_deduplicate", merge_and_deduplicate_node)
+multi_workflow.add_node("generate_multi_resume", generate_multi_resume_node)
+multi_workflow.add_node("upload_multi_resume", upload_multi_resume_node)
+
+def should_clarify_multi(state: MultiRepoState) -> str:
+    return "await_multi_clarification" if state.get("needs_clarification") else "merge_and_deduplicate"
+
+multi_workflow.add_edge(START, "load_merged_facts")
+multi_workflow.add_edge("load_merged_facts", "check_personal_context")
+multi_workflow.add_conditional_edges(
+    "check_personal_context",
+    should_clarify_multi,
+    {
+        "await_multi_clarification": "await_multi_clarification",
+        "merge_and_deduplicate": "merge_and_deduplicate"
+    }
+)
+multi_workflow.add_edge("await_multi_clarification", "check_personal_context")
+multi_workflow.add_edge("merge_and_deduplicate", "generate_multi_resume")
+multi_workflow.add_edge("generate_multi_resume", "upload_multi_resume")
+multi_workflow.add_edge("upload_multi_resume", END)
+
+try:
+    multi_repo_graph = multi_workflow.compile(
+        checkpointer=checkpointer,
+        interrupt_before=["await_multi_clarification"]
+    )
+except Exception as e:
+    logger.exception(f"Failed to compile multi_repo_graph: {e}")
+    multi_repo_graph = multi_workflow.compile(
+        interrupt_before=["await_multi_clarification"]
+    )
 
 def regenerate_single_output(
     output_id: str,

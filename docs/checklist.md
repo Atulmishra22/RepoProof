@@ -138,3 +138,22 @@ This checklist tracks the implementation progress of the platform. Items will be
 - [x] Implement request correlation ID middleware generating or forwarding `X-Request-ID` tracing IDs.
 - [x] Pass correlation `trace_id` through FastAPI HTTP middleware -> Celery tasks -> Langfuse spans.
 - [x] **First Milestone Test**: Verified metrics scrape successfully returning all 9 Gauges, Counters, and Histograms, logs print as valid structured JSON containing trace/user/job contexts, and correlation IDs propagate cleanly across tasks.
+
+---
+
+## [/] Phase 11: Multi-Repo Resume & AI Clarification Gate
+- [x] Add personal profile fields to `User` model (`full_name`, `phone`, `college`, `cgpa`, etc.).
+- [x] Create `MultiRepoJob` table to track combined resume generation runs.
+- [x] Write Alembic migration script (`f7a92c1b3e04`) to add database columns and tables.
+- [x] Extend `AnalysisState` schema to support `personal_context` and `missing_fields`.
+- [x] Rewrite single-repo `check_missing_context_node` to validate all 10 profile fields, auto-filling from GitHub Redis cache.
+- [x] Update single-repo `compile_documents_node` and its LaTeX prompts to include full personal profile headers.
+- [x] Implement multi-repo LangGraph pipeline `multi_repo_graph` (load facts -> check context -> merge/deduplicate -> generate resume with self-healing loop -> upload).
+- [x] Write Celery tasks `run_multi_repo_resume_task` and `resume_multi_repo_resume_task` to run the graph asynchronously.
+- [x] Add multi-repo endpoints to `main.py`: `POST /users/me/resume`, `GET /users/me/resume/{job_id}`, `GET /users/me/resumes`, `POST /users/me/resume/clarify/{job_id}`, plus user profile GET/PATCH endpoints.
+- [x] Create `ProfileCompletionModal` component on the frontend to display all 10 fields and auto-detected badges.
+- [x] Update frontend dashboard to support profile progress indicator and "Build Combined Resume" modal/trigger flow.
+- [x] Implement new multi-repo status tracking page `/dashboard/resume/[jobId]` with polling and clarification trigger.
+- [ ] Run Alembic migrations and verify container execution.
+- [ ] Run automated unit tests to verify the new endpoints and graphs.
+- [ ] **First Milestone Test**: Trigger combined resume with incomplete profile -> verify clarification modal pops up -> complete profile -> verify final LaTeX PDF compiles successfully with merged deduplicated facts from up to 3 projects.

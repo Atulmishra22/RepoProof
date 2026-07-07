@@ -806,3 +806,139 @@ def reflect_user_preferences_task(user_id: str, job_id: str):
     finally:
         db.close()
 
+
+@celery_app.task(bind=True, name="app.tasks.run_multi_repo_resume_task", max_retries=0, time_limit=600)
+def run_multi_repo_resume_task(self, multi_job_id: str, trace_id: Optional[str] = None):
+    """
+    Celery task: runs the multi-repo resume LangGraph pipeline.
+    Merges approved facts from up to 3 repos into one unified LaTeX PDF.
+    """
+    from app.logging_config import bind_log_context
+    bind_log_context(job_id=multi_job_id, trace_id=trace_id or "")
+    logger.info(f"Starting multi-repo resume task for job {multi_job_id}")
+
+    db = SessionLocal()
+    try:
+        from app.models import MultiRepoJob, JobStatus
+        job = db.query(MultiRepoJob).filter(MultiRepoJob.id == multi_job_id).first()
+        if not job:
+            logger.error(f"MultiRepoJob {multi_job_id} not found")
+            return
+
+        job.job_status = JobStatus.RUNNING
+        db.commit()
+
+        from app.analysis_graph import multi_repo_graph
+        config = {"configurable": {"thread_id": multi_job_id}}
+
+        initial_state = {
+            "multi_job_id": str(job.id),
+            "user_id": str(job.user_id),
+            "repo_ids": job.repo_ids,
+            "merged_facts": [],
+            "personal_context": {},
+            "missing_fields": [],
+            "needs_clarification": False,
+            "latex_code": None,
+            "pdf_bytes": None,
+            "status": "starting",
+            "error": None,
+            "llm_tokens_used": 0,
+            "llm_cost_usd": 0.0,
+        }
+
+        result = multi_repo_graph.invoke(initial_state, config=config)
+
+        # Check if graph is interrupted (waiting for clarification)
+        state_info = multi_repo_graph.get_state(config)
+        if state_info.next:
+            logger.info(
+                f"Multi-repo graph interrupted for thread {multi_job_id}. Next: {state_info.next}"
+            )
+            return {"status": "interrupted", "job_id": multi_job_id, "next": state_info.next}
+
+        if result.get("error"):
+            db.query(MultiRepoJob).filter(MultiRepoJob.id == multi_job_id).update({
+                "job_status": JobStatus.FAILED,
+                "error_message": result["error"],
+            })
+            db.commit()
+            logger.error(f"Multi-repo resume job {multi_job_id} failed: {result['error']}")
+        else:
+            logger.info(f"Multi-repo resume job {multi_job_id} completed successfully")
+
+    except Exception as e:
+        logger.exception(f"Multi-repo resume task crashed: {e}")
+        try:
+            from app.models import MultiRepoJob, JobStatus
+            failed_job = db.query(MultiRepoJob).filter(MultiRepoJob.id == multi_job_id).first()
+            if failed_job:
+                failed_job.job_status = JobStatus.FAILED
+                failed_job.error_message = str(e)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        from app.logging_config import clear_log_context
+        clear_log_context()
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.tasks.resume_multi_repo_resume_task", max_retries=0, time_limit=600)
+def resume_multi_repo_resume_task(self, multi_job_id: str, trace_id: Optional[str] = None):
+    """
+    Celery task to resume a paused multi-repo resume LangGraph pipeline after clarification.
+    """
+    from app.logging_config import bind_log_context
+    bind_log_context(job_id=multi_job_id, trace_id=trace_id or "")
+    logger.info(f"Resuming multi-repo resume task for job {multi_job_id}")
+
+    db = SessionLocal()
+    try:
+        from app.models import MultiRepoJob, JobStatus
+        job = db.query(MultiRepoJob).filter(MultiRepoJob.id == multi_job_id).first()
+        if not job:
+            logger.error(f"MultiRepoJob {multi_job_id} not found")
+            return
+
+        job.job_status = JobStatus.RUNNING
+        db.commit()
+
+        from app.analysis_graph import multi_repo_graph
+        config = {"configurable": {"thread_id": multi_job_id}}
+
+        result = multi_repo_graph.invoke(None, config=config)
+
+        # Check if graph is interrupted (waiting for clarification)
+        state_info = multi_repo_graph.get_state(config)
+        if state_info.next:
+            logger.info(
+                f"Multi-repo graph interrupted for thread {multi_job_id}. Next: {state_info.next}"
+            )
+            return {"status": "interrupted", "job_id": multi_job_id, "next": state_info.next}
+
+        if result.get("error"):
+            db.query(MultiRepoJob).filter(MultiRepoJob.id == multi_job_id).update({
+                "job_status": JobStatus.FAILED,
+                "error_message": result["error"],
+            })
+            db.commit()
+            logger.error(f"Multi-repo resume job {multi_job_id} failed: {result['error']}")
+        else:
+            logger.info(f"Multi-repo resume job {multi_job_id} completed successfully")
+
+    except Exception as e:
+        logger.exception(f"Multi-repo resume task crashed: {e}")
+        try:
+            from app.models import MultiRepoJob, JobStatus
+            failed_job = db.query(MultiRepoJob).filter(MultiRepoJob.id == multi_job_id).first()
+            if failed_job:
+                failed_job.job_status = JobStatus.FAILED
+                failed_job.error_message = str(e)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        from app.logging_config import clear_log_context
+        clear_log_context()
+        db.close()
